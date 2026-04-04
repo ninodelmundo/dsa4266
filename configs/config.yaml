@@ -1,0 +1,66 @@
+project:
+  name: "phishing_detection_multimodal"
+  seed: 42
+  device: "cuda"  # or "cpu"
+  output_dir: "outputs/"
+
+data:
+  raw_dir: "data/raw/"
+  processed_dir: "data/processed/"
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  max_samples: null  # set to integer to limit dataset size for testing
+
+url:
+  max_length: 200
+  vocab_size: 85  # computed from URL_CHAR_VOCAB + padding
+  embedding_dim: 64
+  hidden_dim: 128
+  output_dim: 256
+  model_type: "lstm"  # options: "cnn", "lstm", "transformer"
+  num_layers: 2
+  dropout: 0.3
+
+text:
+  model_name: "distilbert-base-uncased"
+  max_length: 256
+  output_dim: 256
+  dropout: 0.3
+  freeze_layers: 4  # freeze first N layers of DistilBERT (has 6 total)
+
+visual:
+  model_name: "efficientnet_b0"  # lighter than resnet50, fits in 3.7GB RAM
+  image_size: 224
+  output_dim: 256
+  dropout: 0.3
+  freeze_layers: true  # freeze backbone, train only head
+
+fusion:
+  strategy: "concatenation"  # options: "concatenation", "weighted", "attention"
+  projected_dim: 256
+  hidden_dim: 512
+  dropout: 0.4
+  num_classes: 2
+
+training:
+  batch_size: 8
+  num_epochs: 10
+  learning_rate: 1e-3
+  bert_learning_rate: 2e-5  # lower LR for pre-trained BERT layers
+  weight_decay: 1e-4
+  patience: 3  # early stopping
+  gradient_clip: 1.0
+  class_weights: true  # handle class imbalance
+  decision_threshold: 0.5
+
+evaluation:
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - roc_auc
+    - pr_auc
+  ablation: true
+  robustness_tests: true
