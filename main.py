@@ -39,32 +39,37 @@ def step_preprocess(config, logger):
 
 
 def step_train(config, logger, device, df, include_unimodal=False):
-    """Train models. By default only the multimodal fusion model."""
+    """Train models using pre-extracted embeddings for speed."""
     import gc
     import torch
-    from transformers import AutoTokenizer
 
-    from src.data.preprocessor import create_dataloaders, compute_class_weights
+    from src.data.preprocessor import (
+        extract_and_save_features,
+        create_fast_dataloaders,
+        compute_class_weights,
+    )
     from src.models.fusion_model import (
-        FusionClassifier,
+        FastFusionClassifier,
         URLOnlyClassifier,
-        TextOnlyClassifier,
-        VisualOnlyClassifier,
+        FastTextOnlyClassifier,
+        FastVisualOnlyClassifier,
     )
     from src.training.trainer import Trainer
-    from src.evaluation.metrics import collect_predictions, compute_metrics
+    from src.evaluation.metrics import collect_predictions, compute_metrics, find_optimal_threshold
     from src.evaluation.analysis import plot_training_curves
     from src.utils.helpers import count_parameters
 
-    tokenizer = AutoTokenizer.from_pretrained(config["text"]["model_name"])
     output_base = config["project"]["output_dir"]
 
     max_samples = config["data"].get("max_samples")
     if max_samples:
         df = df.head(max_samples)
 
-    train_loader, val_loader, test_loader = create_dataloaders(
-        df, tokenizer, config
+    # Extract frozen DistilBERT + EfficientNet embeddings once (cached)
+    features = extract_and_save_features(df, config)
+
+    train_loader, val_loader, test_loader = create_fast_dataloaders(
+        df, features, config
     )
     class_weights = compute_class_weights(df, device)
 
@@ -74,8 +79,8 @@ def step_train(config, logger, device, df, include_unimodal=False):
     if include_unimodal:
         unimodal_configs = [
             ("URL-Only", URLOnlyClassifier, "url"),
-            ("Text-Only", TextOnlyClassifier, "text"),
-            ("Visual-Only", VisualOnlyClassifier, "visual"),
+            ("Text-Only", FastTextOnlyClassifier, "fast_text"),
+            ("Visual-Only", FastVisualOnlyClassifier, "fast_visual"),
         ]
 
         for name, model_cls, model_type in unimodal_configs:
@@ -98,10 +103,18 @@ def step_train(config, logger, device, df, include_unimodal=False):
             history = trainer.fit(out_dir)
             plot_training_curves(history, out_dir, name)
 
-            y_true, y_pred, y_prob = collect_predictions(
+            # Find optimal threshold on validation set
+            val_true, _, val_prob = collect_predictions(
+                model, val_loader, device, model_type
+            )
+            optimal_thresh = find_optimal_threshold(val_true, val_prob)
+            logger.info(f"  Optimal threshold (val F1): {optimal_thresh:.2f}")
+
+            y_true, _, y_prob = collect_predictions(
                 model, test_loader, device, model_type
             )
-            metrics = compute_metrics(y_true, y_pred, y_prob)
+            y_pred = (y_prob >= optimal_thresh).astype(int)
+            metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)
             all_results[name] = {
                 "y_true": y_true,
                 "y_pred": y_pred,
@@ -111,15 +124,13 @@ def step_train(config, logger, device, df, include_unimodal=False):
 
             del model, trainer
             gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
 
     # ── Multimodal fusion (always) ───────────────────────────────────────────
     out_dir = os.path.join(output_base, "multimodal")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     logger.info(f"\n{'='*60}\nTraining Multimodal Fusion\n{'='*60}")
-    fusion_model = FusionClassifier(config)
+    fusion_model = FastFusionClassifier(config)
     logger.info(f"Trainable parameters: {count_parameters(fusion_model):,}")
 
     trainer = Trainer(
@@ -129,15 +140,23 @@ def step_train(config, logger, device, df, include_unimodal=False):
         train_loader=train_loader,
         val_loader=val_loader,
         class_weights=class_weights,
-        model_type="multimodal",
+        model_type="fast_multimodal",
     )
     history = trainer.fit(out_dir)
     plot_training_curves(history, out_dir, "Multimodal Fusion")
 
-    y_true, y_pred, y_prob = collect_predictions(
-        fusion_model, test_loader, device, "multimodal"
+    # Find optimal threshold on validation set
+    val_true, _, val_prob = collect_predictions(
+        fusion_model, val_loader, device, "fast_multimodal"
     )
-    metrics = compute_metrics(y_true, y_pred, y_prob)
+    optimal_thresh = find_optimal_threshold(val_true, val_prob)
+    logger.info(f"  Optimal threshold (val F1): {optimal_thresh:.2f}")
+
+    y_true, _, y_prob = collect_predictions(
+        fusion_model, test_loader, device, "fast_multimodal"
+    )
+    y_pred = (y_prob >= optimal_thresh).astype(int)
+    metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)
     all_results["Multimodal"] = {
         "y_true": y_true,
         "y_pred": y_pred,
@@ -197,7 +216,8 @@ def step_evaluate(config, logger, all_results):
             f"ROC-AUC: {m['roc_auc']:.4f} | "
             f"Acc: {m['accuracy']:.4f} | "
             f"Prec: {m['precision']:.4f} | "
-            f"Rec: {m['recall']:.4f}"
+            f"Rec: {m['recall']:.4f} | "
+            f"Thresh: {m['threshold']:.2f}"
         )
     logger.info("=" * 70)
     logger.info(f"Plots saved to {eval_dir}")

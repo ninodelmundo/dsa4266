@@ -55,7 +55,9 @@ def extract_url_features(url: str) -> dict:
 def clean_html_text(html_content: str) -> str:
     """Extract and clean visible text from raw HTML."""
     try:
-        from bs4 import BeautifulSoup
+        from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+        import warnings
+        warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
         soup = BeautifulSoup(html_content, "lxml")
 

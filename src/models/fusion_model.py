@@ -180,3 +180,141 @@ class VisualOnlyClassifier(nn.Module):
 
     def forward(self, images, **kwargs):
         return self.classifier(self.encoder(images))
+
+
+# ── Fast variants using pre-extracted embeddings ─────────────────────────────
+
+
+class FastFusionClassifier(nn.Module):
+    """
+    Fast multi-modal fusion using pre-extracted DistilBERT (768-d) and
+    EfficientNet (1280-d) embeddings.  Only the URL encoder, projection
+    heads, and classifier run during training.
+    """
+
+    def __init__(self, config: dict):
+        super().__init__()
+        fusion_cfg = config["fusion"]
+        self.strategy = fusion_cfg["strategy"]
+        self.projected_dim = fusion_cfg["projected_dim"]
+        self.hidden_dim = fusion_cfg["hidden_dim"]
+        self.dropout_p = fusion_cfg["dropout"]
+
+        # URL encoder runs live (small, fast on CPU)
+        self.url_encoder = build_url_encoder(config)
+
+        # Per-modality projections from raw feature dimensions
+        self.url_proj = nn.Sequential(
+            nn.Linear(config["url"]["output_dim"], self.projected_dim),
+            nn.ReLU(),
+            nn.LayerNorm(self.projected_dim),
+        )
+        self.text_proj = nn.Sequential(
+            nn.Linear(768, self.projected_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(config["text"]["dropout"]),
+            nn.Linear(self.projected_dim * 2, self.projected_dim),
+            nn.LayerNorm(self.projected_dim),
+        )
+        self.visual_proj = nn.Sequential(
+            nn.Dropout(config["visual"]["dropout"]),
+            nn.Linear(1280, self.projected_dim * 2),
+            nn.ReLU(),
+            nn.Dropout(config["visual"]["dropout"]),
+            nn.Linear(self.projected_dim * 2, self.projected_dim),
+            nn.LayerNorm(self.projected_dim),
+        )
+
+        # Fusion-specific parameters
+        if self.strategy == "weighted":
+            self.modality_weights = nn.Parameter(torch.ones(3))
+        elif self.strategy == "attention":
+            self.attention = nn.MultiheadAttention(
+                embed_dim=self.projected_dim,
+                num_heads=4,
+                dropout=self.dropout_p,
+                batch_first=True,
+            )
+            self.attention_norm = nn.LayerNorm(self.projected_dim)
+
+        # Classifier head
+        if self.strategy == "concatenation":
+            classifier_in = self.projected_dim * 3
+        else:
+            classifier_in = self.projected_dim
+
+        self.classifier = nn.Sequential(
+            nn.Linear(classifier_in, self.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_p),
+            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_p),
+            nn.Linear(self.hidden_dim // 2, 2),
+        )
+
+    def forward(
+        self,
+        url_tokens: torch.Tensor,
+        text_emb: torch.Tensor,
+        visual_emb: torch.Tensor,
+    ) -> torch.Tensor:
+        url_emb = self.url_proj(self.url_encoder(url_tokens))
+        text_emb = self.text_proj(text_emb)
+        visual_emb = self.visual_proj(visual_emb)
+
+        if self.strategy == "concatenation":
+            fused = torch.cat([url_emb, text_emb, visual_emb], dim=-1)
+        elif self.strategy == "weighted":
+            w = F.softmax(self.modality_weights, dim=0)
+            fused = w[0] * url_emb + w[1] * text_emb + w[2] * visual_emb
+        elif self.strategy == "attention":
+            stack = torch.stack([url_emb, text_emb, visual_emb], dim=1)
+            attended, _ = self.attention(stack, stack, stack)
+            attended = self.attention_norm(attended + stack)
+            fused = attended.mean(dim=1)
+
+        return self.classifier(fused)
+
+    def get_modality_weights(self) -> Optional[torch.Tensor]:
+        if self.strategy == "weighted":
+            return F.softmax(self.modality_weights.detach(), dim=0).cpu()
+        return None
+
+
+class FastTextOnlyClassifier(nn.Module):
+    """Text-only baseline using pre-extracted 768-d DistilBERT embeddings."""
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(768, 512),
+            nn.ReLU(),
+            nn.Dropout(config["text"]["dropout"]),
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Dropout(config["fusion"]["dropout"]),
+            nn.Linear(128, 2),
+        )
+
+    def forward(self, text_emb, **kwargs):
+        return self.classifier(text_emb)
+
+
+class FastVisualOnlyClassifier(nn.Module):
+    """Visual-only baseline using pre-extracted 1280-d EfficientNet embeddings."""
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self.classifier = nn.Sequential(
+            nn.Linear(1280, 512),
+            nn.ReLU(),
+            nn.Dropout(config["visual"]["dropout"]),
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Dropout(config["fusion"]["dropout"]),
+            nn.Linear(128, 2),
+        )
+
+    def forward(self, visual_emb, **kwargs):
+        return self.classifier(visual_emb)

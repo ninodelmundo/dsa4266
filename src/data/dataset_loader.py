@@ -1,42 +1,61 @@
 import os
 import logging
 import pandas as pd
-import numpy as np
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def _find_label_dirs(base_dir: Path):
+def _find_label_dirs(base_dir: Path) -> dict:
     """
     Find genuine_site_0 / phishing_site_1 folders,
     handling double-nested Kaggle extractions.
+    Returns dict: folder_name -> Path.
     """
-    results = []
+    results = {}
     for item in base_dir.iterdir():
         if not item.is_dir():
             continue
         name = item.name.lower()
         if "phishing" in name:
-            results.append((item, 1))
+            results["phishing_site_1"] = item
         elif "genuine" in name:
-            results.append((item, 0))
+            results["genuine_site_0"] = item
         else:
             for child in item.iterdir():
                 if not child.is_dir():
                     continue
                 cname = child.name.lower()
                 if "phishing" in cname:
-                    results.append((child, 1))
+                    results["phishing_site_1"] = child
                 elif "genuine" in cname:
-                    results.append((child, 0))
+                    results["genuine_site_0"] = child
     return results
+
+
+def _build_file_index(folder_path: Path, extensions=None) -> dict:
+    """Build mapping: numeric_suffix -> file_path for all files in folder."""
+    index_map = {}
+    if not folder_path or not folder_path.exists():
+        return index_map
+    for f in folder_path.iterdir():
+        if not f.is_file():
+            continue
+        if extensions and f.suffix.lower() not in extensions:
+            continue
+        # Extract numeric suffix: "domain_141" -> 141
+        parts = f.stem.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            index_map[int(parts[1])] = str(f)
+    return index_map
 
 
 class PhishingDatasetLoader:
     """
-    Loads HTML + screenshots, inner-joins by filename so every entry
-    has BOTH modalities, then optionally matches URLs.
+    Matches HuggingFace URL entries to Kaggle HTML/screenshot files
+    using the row index → filename suffix mapping.
+    Only keeps entries with BOTH HTML and image (inner join).
+    Preserves original HF train/val/test splits.
     """
 
     def __init__(self, config: dict):
@@ -44,124 +63,92 @@ class PhishingDatasetLoader:
         self.processed_dir = Path(config["data"]["processed_dir"])
         self.processed_dir.mkdir(parents=True, exist_ok=True)
 
-    def load_html(self) -> pd.DataFrame:
-        html_dir = self.raw_dir / "html_content"
-        if not html_dir.exists():
-            return pd.DataFrame(columns=["filename", "html_content", "label"])
-
-        label_dirs = _find_label_dirs(html_dir)
-        records = []
-        for path, label in label_dirs:
-            for f in path.iterdir():
-                if f.is_file():
-                    try:
-                        records.append({
-                            "filename": f.stem,
-                            "html_content": f.read_text(errors="ignore"),
-                            "label": label,
-                        })
-                    except Exception:
-                        pass
-            logger.info(f"  HTML {path.name}: {sum(1 for r in records if r['label'] == label)} files")
-
-        return pd.DataFrame(records)
-
-    def load_screenshots(self) -> pd.DataFrame:
-        ss_dir = self.raw_dir / "screenshots"
-        if not ss_dir.exists():
-            return pd.DataFrame(columns=["filename", "image_path", "label"])
-
-        exts = {".png", ".jpg", ".jpeg", ".webp"}
-        label_dirs = _find_label_dirs(ss_dir)
-        records = []
-        for path, label in label_dirs:
-            for f in path.iterdir():
-                if f.suffix.lower() in exts:
-                    records.append({
-                        "filename": f.stem,
-                        "image_path": str(f),
-                        "label": label,
-                    })
-            logger.info(f"  Screenshots {path.name}: {sum(1 for r in records if r['label'] == label)} files")
-
-        return pd.DataFrame(records)
-
-    def load_urls(self) -> pd.DataFrame:
-        """Load all URL CSVs (train/val/test) with split info."""
-        urls_dir = self.raw_dir / "urls"
-        if not urls_dir.exists():
-            return pd.DataFrame(columns=["url", "label", "split"])
-
-        dfs = []
-        for split_name, filename in [("train", "train.csv"), ("val", "validation.csv"), ("test", "test.csv")]:
-            csv_path = urls_dir / filename
-            if csv_path.exists():
-                df = pd.read_csv(csv_path)
-                # Rename columns: text->url, labels->label
-                col_map = {}
-                for c in df.columns:
-                    if c.lower() in ("text", "url"):
-                        col_map[c] = "url"
-                    elif c.lower() in ("labels", "label"):
-                        col_map[c] = "label"
-                df = df.rename(columns=col_map)
-                df["split"] = split_name
-                dfs.append(df[["url", "label", "split"]])
-                logger.info(f"  URLs {split_name}: {len(df)} rows")
-
-        return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=["url", "label", "split"])
-
     def build_merged_dataset(self) -> pd.DataFrame:
-        """
-        Inner-join HTML + screenshots by filename.
-        Every row is guaranteed to have BOTH html_content AND image_path.
-        Then match URLs and assign train/val/test splits.
-        """
         cache_path = self.processed_dir / "merged_dataset.csv"
         if cache_path.exists():
             logger.info(f"Loading cached merged dataset from {cache_path}")
             return pd.read_csv(cache_path)
 
-        html_df = self.load_html()
-        ss_df = self.load_screenshots()
-        url_df = self.load_urls()
+        # ── 1. Load HuggingFace URL data with split info ─────────────────
+        urls_dir = self.raw_dir / "urls"
+        dfs = []
+        for split_name, filename in [
+            ("train", "train.csv"),
+            ("val", "validation.csv"),
+            ("test", "test.csv"),
+        ]:
+            csv_path = urls_dir / filename
+            if csv_path.exists():
+                df = pd.read_csv(csv_path)
+                df = df.rename(columns={"text": "url", "labels": "label"})
+                df["split"] = split_name
+                dfs.append(df)
+                logger.info(f"  URLs {split_name}: {len(df)} rows")
 
-        logger.info(f"HTML: {len(html_df)} | Screenshots: {len(ss_df)} | URLs: {len(url_df)}")
+        if not dfs:
+            raise RuntimeError(
+                "No URL data found. Run scripts/download_data.py first."
+            )
 
-        if html_df.empty or ss_df.empty:
-            raise RuntimeError("Need both HTML and screenshot data. Run scripts/download_data.py first.")
-
-        # Inner join — only keep entries that have BOTH html and image
-        merged = html_df.merge(
-            ss_df[["filename", "image_path"]],
-            on="filename",
-            how="inner",
+        # Concatenate in split order (train, val, test) and use row index
+        df_hf = pd.concat(dfs, ignore_index=True)
+        df_hf["filename_index"] = df_hf.index
+        df_hf["folder"] = df_hf["label"].apply(
+            lambda x: "phishing_site_1" if x == 1 else "genuine_site_0"
         )
-        logger.info(f"After inner join (both HTML + image): {len(merged)} entries")
+        logger.info(f"Total HF entries: {len(df_hf)}")
 
-        # Match URLs by domain
-        if not url_df.empty:
-            # Build domain -> (url, split) lookup
-            url_lookup = {}
-            for _, row in url_df.iterrows():
-                url = str(row["url"])
-                domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-                url_lookup[domain] = (url, row["split"])
+        # ── 2. Build file indexes for HTML and screenshots ───────────────
+        html_dirs = _find_label_dirs(self.raw_dir / "html_content")
+        img_dirs = _find_label_dirs(self.raw_dir / "screenshots")
 
-            domain_col = merged["filename"].astype(str).str.rsplit("_", n=1).str[0]
-            merged["url"] = domain_col.map(lambda d: url_lookup.get(d, (None, None))[0])
-            merged["split"] = domain_col.map(lambda d: url_lookup.get(d, (None, None))[1])
+        html_index = {}  # (folder_name, numeric_idx) -> file_path
+        img_index = {}
 
-            matched = merged["url"].notna().sum()
-            logger.info(f"URLs matched: {matched}/{len(merged)}")
+        for folder_name, folder_path in html_dirs.items():
+            file_map = _build_file_index(folder_path)
+            for idx, path in file_map.items():
+                html_index[(folder_name, idx)] = path
+            logger.info(f"  HTML {folder_name}: {len(file_map)} files")
 
-            # Entries without a split match go to train
-            merged["split"] = merged["split"].fillna("train")
-        else:
-            merged["url"] = None
-            merged["split"] = "train"
+        img_exts = {".png", ".jpg", ".jpeg", ".webp"}
+        for folder_name, folder_path in img_dirs.items():
+            file_map = _build_file_index(folder_path, img_exts)
+            for idx, path in file_map.items():
+                img_index[(folder_name, idx)] = path
+            logger.info(f"  Screenshots {folder_name}: {len(file_map)} files")
 
-        # Summary
+        # ── 3. Match each HF entry to HTML + image by index ──────────────
+        df_hf["html_path"] = df_hf.apply(
+            lambda r: html_index.get((r["folder"], r["filename_index"])),
+            axis=1,
+        )
+        df_hf["image_path"] = df_hf.apply(
+            lambda r: img_index.get((r["folder"], r["filename_index"])),
+            axis=1,
+        )
+
+        has_html = df_hf["html_path"].notna().sum()
+        has_img = df_hf["image_path"].notna().sum()
+        logger.info(f"Matched HTML: {has_html} | Matched image: {has_img}")
+
+        # ── 4. Keep only entries with BOTH HTML and image ────────────────
+        merged = df_hf.dropna(subset=["html_path", "image_path"]).reset_index(
+            drop=True
+        )
+        logger.info(f"After filtering (both HTML + image): {len(merged)} entries")
+
+        # Read HTML content from files
+        merged["html_content"] = merged["html_path"].apply(
+            lambda p: Path(p).read_text(errors="ignore")
+        )
+
+        # Keep relevant columns
+        merged = merged[
+            ["url", "label", "split", "filename_index", "html_content", "image_path"]
+        ]
+
+        # ── 5. Summary ──────────────────────────────────────────────────
         for split in ["train", "val", "test"]:
             subset = merged[merged["split"] == split]
             if len(subset) > 0:

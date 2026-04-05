@@ -105,6 +105,16 @@ def collect_predictions(
                 )
             elif model_type == "visual":
                 logits = model(images=batch["image"].to(device))
+            elif model_type == "fast_multimodal":
+                logits = model(
+                    url_tokens=batch["url"].to(device),
+                    text_emb=batch["text_emb"].to(device),
+                    visual_emb=batch["visual_emb"].to(device),
+                )
+            elif model_type == "fast_text":
+                logits = model(text_emb=batch["text_emb"].to(device))
+            elif model_type == "fast_visual":
+                logits = model(visual_emb=batch["visual_emb"].to(device))
 
             probs = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
             all_labels.extend(labels.cpu().numpy())

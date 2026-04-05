@@ -104,6 +104,16 @@ class Trainer:
             )
         elif self.model_type == "visual":
             return self.model(images=batch["image"].to(self.device))
+        elif self.model_type == "fast_multimodal":
+            return self.model(
+                url_tokens=batch["url"].to(self.device),
+                text_emb=batch["text_emb"].to(self.device),
+                visual_emb=batch["visual_emb"].to(self.device),
+            )
+        elif self.model_type == "fast_text":
+            return self.model(text_emb=batch["text_emb"].to(self.device))
+        elif self.model_type == "fast_visual":
+            return self.model(visual_emb=batch["visual_emb"].to(self.device))
 
     def train_epoch(self) -> Tuple[float, Dict]:
         """Train for one epoch."""

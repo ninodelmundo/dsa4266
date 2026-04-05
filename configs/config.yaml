@@ -27,7 +27,7 @@ text:
   max_length: 256
   output_dim: 256
   dropout: 0.3
-  freeze_layers: 4  # freeze first N layers of DistilBERT (has 6 total)
+  freeze_layers: 6  # freeze all DistilBERT layers, train only projection head
 
 visual:
   model_name: "efficientnet_b0"  # lighter than resnet50, fits in 3.7GB RAM
@@ -37,19 +37,19 @@ visual:
   freeze_layers: true  # freeze backbone, train only head
 
 fusion:
-  strategy: "concatenation"  # options: "concatenation", "weighted", "attention"
+  strategy: "attention"  # options: "concatenation", "weighted", "attention"
   projected_dim: 256
   hidden_dim: 512
   dropout: 0.4
   num_classes: 2
 
 training:
-  batch_size: 8
-  num_epochs: 10
+  batch_size: 32
+  num_epochs: 30
   learning_rate: 1e-3
   bert_learning_rate: 2e-5  # lower LR for pre-trained BERT layers
   weight_decay: 1e-4
-  patience: 3  # early stopping
+  patience: 7  # early stopping
   gradient_clip: 1.0
   class_weights: true  # handle class imbalance
   decision_threshold: 0.5
