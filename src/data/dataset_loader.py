@@ -138,10 +138,17 @@ class PhishingDatasetLoader:
         )
         logger.info(f"After filtering (both HTML + image): {len(merged)} entries")
 
-        # Read HTML content from files
-        merged["html_content"] = merged["html_path"].apply(
-            lambda p: Path(p).read_text(errors="ignore")
-        )
+        # Read HTML content from files (some Kaggle files have Windows-incompatible names)
+        def _safe_read(p):
+            try:
+                return Path(p).read_text(errors="ignore")
+            except OSError:
+                return ""
+
+        merged["html_content"] = merged["html_path"].apply(_safe_read)
+        unreadable = (merged["html_content"] == "").sum()
+        if unreadable > 0:
+            logger.warning(f"  {unreadable} HTML files could not be read (OS-incompatible filenames)")
 
         # Keep relevant columns
         merged = merged[

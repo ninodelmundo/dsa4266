@@ -14,6 +14,31 @@ from .callbacks import EarlyStopping, MetricLogger
 logger = logging.getLogger(__name__)
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss: down-weights easy examples so training focuses on hard
+    boundary cases.  FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    """
+
+    def __init__(self, weight=None, gamma=2.0, label_smoothing=0.1):
+        super().__init__()
+        self.weight = weight          # per-class weight tensor
+        self.gamma = gamma
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits, targets):
+        # Apply label smoothing via standard CE first
+        ce = nn.functional.cross_entropy(
+            logits, targets,
+            weight=self.weight,
+            reduction="none",
+            label_smoothing=self.label_smoothing,
+        )
+        pt = torch.exp(-ce)           # p_t = probability of correct class
+        focal = ((1 - pt) ** self.gamma) * ce
+        return focal.mean()
+
+
 class Trainer:
     """
     Generic trainer that works for both unimodal and multimodal models.
@@ -43,9 +68,9 @@ class Trainer:
 
         # Loss function
         if class_weights is not None:
-            self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+            self.criterion = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.1)
         else:
-            self.criterion = nn.CrossEntropyLoss()
+            self.criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
         # Optimizer — use different LR for BERT layers
         self.optimizer = self._build_optimizer(train_cfg)
@@ -107,6 +132,8 @@ class Trainer:
         elif self.model_type == "fast_multimodal":
             return self.model(
                 url_tokens=batch["url"].to(self.device),
+                url_features=batch["url_features"].to(self.device),
+                html_features=batch["html_features"].to(self.device),
                 text_emb=batch["text_emb"].to(self.device),
                 visual_emb=batch["visual_emb"].to(self.device),
             )

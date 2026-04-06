@@ -8,6 +8,8 @@ from typing import Dict, Tuple
 
 from .data_utils import (
     url_to_tensor,
+    url_to_feature_tensor,
+    extract_html_features,
     clean_html_text,
     get_image_transforms,
 )
@@ -181,7 +183,7 @@ def _extract_text_embeddings(df: pd.DataFrame, config: dict) -> torch.Tensor:
         return_tensors="pt",
     )
 
-    # Extract [CLS] token in batches
+    # Extract mean-pooled embeddings in batches (better than [CLS] alone)
     batch_size = 32
     embeddings = []
     with torch.no_grad():
@@ -189,7 +191,11 @@ def _extract_text_embeddings(df: pd.DataFrame, config: dict) -> torch.Tensor:
             ids = encodings["input_ids"][i : i + batch_size]
             mask = encodings["attention_mask"][i : i + batch_size]
             out = model(input_ids=ids, attention_mask=mask)
-            embeddings.append(out.last_hidden_state[:, 0, :].cpu())
+            hidden = out.last_hidden_state                    # (B, L, 768)
+            mask_expanded = mask.unsqueeze(-1).float()        # (B, L, 1)
+            summed = (hidden * mask_expanded).sum(dim=1)      # (B, 768)
+            counts = mask_expanded.sum(dim=1).clamp(min=1)    # (B, 1)
+            embeddings.append((summed / counts).cpu())        # mean pool over non-padding
 
     del model, tokenizer, encodings
     gc.collect()
@@ -259,13 +265,24 @@ def extract_and_save_features(df: pd.DataFrame, config: dict) -> dict:
     visual_emb = _extract_visual_embeddings(df, config)
     logger.info(f"  Visual embeddings: {visual_emb.shape}")
 
-    # URL tensors
+    # URL tensors (character-level) + hand-crafted features
     max_url_len = config["url"]["max_length"]
     url_tensors = []
+    url_features = []
     for url in df["url"]:
         url_str = str(url) if pd.notna(url) else ""
         url_tensors.append(url_to_tensor(url_str, max_url_len))
+        url_features.append(url_to_feature_tensor(url_str))
     url_tensors = torch.stack(url_tensors)
+    url_features = torch.stack(url_features)   # (N, 9)
+
+    # HTML structural features (forms, inputs, password fields, etc.)
+    logger.info("  Extracting HTML structural features...")
+    html_features = []
+    for html in df["html_content"]:
+        html_features.append(extract_html_features(html))
+    html_features = torch.stack(html_features)  # (N, 8)
+    logger.info(f"  HTML features: {html_features.shape}")
 
     labels = torch.tensor(df["label"].values, dtype=torch.long)
 
@@ -273,6 +290,8 @@ def extract_and_save_features(df: pd.DataFrame, config: dict) -> dict:
         "text_embeddings": text_emb,
         "visual_embeddings": visual_emb,
         "url_tensors": url_tensors,
+        "url_features": url_features,
+        "html_features": html_features,
         "labels": labels,
     }
 
@@ -285,8 +304,10 @@ def extract_and_save_features(df: pd.DataFrame, config: dict) -> dict:
 class PreExtractedDataset(Dataset):
     """Lightweight dataset: pre-extracted embeddings only. No image I/O or model forward passes."""
 
-    def __init__(self, url_tensors, text_embeddings, visual_embeddings, labels):
+    def __init__(self, url_tensors, url_features, html_features, text_embeddings, visual_embeddings, labels):
         self.url_tensors = url_tensors
+        self.url_features = url_features
+        self.html_features = html_features
         self.text_embeddings = text_embeddings
         self.visual_embeddings = visual_embeddings
         self.labels = labels
@@ -297,6 +318,8 @@ class PreExtractedDataset(Dataset):
     def __getitem__(self, idx):
         return {
             "url": self.url_tensors[idx],
+            "url_features": self.url_features[idx],
+            "html_features": self.html_features[idx],
             "text_emb": self.text_embeddings[idx],
             "visual_emb": self.visual_embeddings[idx],
             "label": self.labels[idx],
@@ -319,6 +342,8 @@ def create_fast_dataloaders(
     def _make(mask, shuffle):
         ds = PreExtractedDataset(
             url_tensors=features["url_tensors"][mask],
+            url_features=features["url_features"][mask],
+            html_features=features["html_features"][mask],
             text_embeddings=features["text_embeddings"][mask],
             visual_embeddings=features["visual_embeddings"][mask],
             labels=features["labels"][mask],

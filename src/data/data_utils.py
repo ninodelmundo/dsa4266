@@ -29,6 +29,36 @@ def url_to_tensor(url: str, max_length: int = 200) -> torch.Tensor:
     return torch.tensor(indices, dtype=torch.long)
 
 
+URL_FEATURES_DIM = 9
+
+
+def url_to_feature_tensor(url: str) -> torch.Tensor:
+    """
+    Extract 9 normalized hand-crafted URL features as a float tensor.
+    All values clamped to [0, 1] so they are on the same scale as model activations.
+    """
+    url = url.strip()
+    length       = min(len(url), 500) / 500.0
+    num_dots     = min(url.count("."), 20) / 20.0
+    num_hyphens  = min(url.count("-"), 20) / 20.0
+    num_slashes  = min(url.count("/"), 20) / 20.0
+    num_digits   = min(sum(c.isdigit() for c in url), 50) / 50.0
+    num_special  = min(sum(c in "@?=&%" for c in url), 20) / 20.0
+    has_ip       = float(bool(re.search(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", url)))
+    has_https    = float(url.lower().startswith("https"))
+    subdomain_count = min(
+        len(url.split("/")[2].split(".")) - 2
+        if "/" in url and len(url.split("/")) > 2
+        else 0,
+        10,
+    ) / 10.0
+    return torch.tensor(
+        [length, num_dots, num_hyphens, num_slashes, num_digits,
+         num_special, has_ip, has_https, subdomain_count],
+        dtype=torch.float32,
+    )
+
+
 def extract_url_features(url: str) -> dict:
     """Extract hand-crafted URL features for analysis."""
     parsed = {}
@@ -73,6 +103,43 @@ def clean_html_text(html_content: str) -> str:
         # Fallback: strip HTML tags with regex
         text = re.sub(r"<[^>]+>", " ", html_content)
         return re.sub(r"\s+", " ", text).strip()
+
+
+# ── HTML Structural Feature Utilities ────────────────────────────────────────
+
+HTML_FEATURES_DIM = 8
+
+
+def extract_html_features(html_content: str) -> torch.Tensor:
+    """
+    Extract 8 normalised structural features from raw HTML.
+    These capture phishing-specific patterns that DistilBERT (text-only) misses.
+    """
+    html = str(html_content) if html_content else ""
+    html_lower = html.lower()
+
+    form_count     = min(html_lower.count("<form"), 10) / 10.0
+    input_count    = min(html_lower.count("<input"), 20) / 20.0
+    has_password   = float("password" in html_lower and "<input" in html_lower)
+    script_count   = min(html_lower.count("<script"), 20) / 20.0
+    iframe_count   = min(html_lower.count("<iframe"), 10) / 10.0
+    meta_refresh   = float("http-equiv" in html_lower and "refresh" in html_lower)
+
+    # External link ratio: count href="http" (external) vs total href
+    import re as _re
+    all_hrefs = _re.findall(r'href\s*=', html_lower)
+    ext_hrefs = _re.findall(r'href\s*=\s*["\']https?://', html_lower)
+    ext_ratio = len(ext_hrefs) / max(len(all_hrefs), 1)
+
+    # Visible text length (rough proxy — stripped of tags)
+    text_only = _re.sub(r'<[^>]+>', ' ', html)
+    text_len = min(len(text_only.split()), 2000) / 2000.0
+
+    return torch.tensor(
+        [form_count, input_count, has_password, script_count,
+         iframe_count, meta_refresh, ext_ratio, text_len],
+        dtype=torch.float32,
+    )
 
 
 # ── Image Utilities ──────────────────────────────────────────────────────────
