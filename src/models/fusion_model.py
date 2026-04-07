@@ -212,25 +212,21 @@ class FastFusionClassifier(nn.Module):
             nn.LayerNorm(self.projected_dim),
         )
         self.text_proj = nn.Sequential(
-            nn.Linear(768, self.projected_dim * 2),
+            nn.Linear(768, self.projected_dim),
             nn.ReLU(),
-            nn.Dropout(config["text"]["dropout"]),
-            nn.Linear(self.projected_dim * 2, self.projected_dim),
+            nn.Dropout(self.dropout_p),
             nn.LayerNorm(self.projected_dim),
         )
         self.visual_proj = nn.Sequential(
-            nn.Dropout(config["visual"]["dropout"]),
-            nn.Linear(1280, self.projected_dim * 2),
+            nn.Linear(1280, self.projected_dim),
             nn.ReLU(),
-            nn.Dropout(config["visual"]["dropout"]),
-            nn.Linear(self.projected_dim * 2, self.projected_dim),
+            nn.Dropout(self.dropout_p),
             nn.LayerNorm(self.projected_dim),
         )
         # HTML structural features (forms, inputs, password fields, etc.)
         self.html_proj = nn.Sequential(
-            nn.Linear(HTML_FEATURES_DIM, 64),
+            nn.Linear(HTML_FEATURES_DIM, self.projected_dim),
             nn.ReLU(),
-            nn.Linear(64, self.projected_dim),
             nn.LayerNorm(self.projected_dim),
         )
 
@@ -256,10 +252,7 @@ class FastFusionClassifier(nn.Module):
             nn.Linear(classifier_in, self.hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
-            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(self.hidden_dim // 2, 2),
+            nn.Linear(self.hidden_dim, 2),
         )
 
     def forward(
