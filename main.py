@@ -55,7 +55,12 @@ def step_train(config, logger, device, df, include_unimodal=False):
         FastVisualOnlyClassifier,
     )
     from src.training.trainer import Trainer
-    from src.evaluation.metrics import collect_predictions, compute_metrics, find_optimal_threshold
+    from src.evaluation.metrics import (
+        collect_predictions_calibrated,
+        calibrate_temperature,
+        compute_metrics,
+        find_optimal_threshold,
+    )
     from src.evaluation.analysis import plot_training_curves
     from src.utils.helpers import count_parameters
 
@@ -103,15 +108,18 @@ def step_train(config, logger, device, df, include_unimodal=False):
             history = trainer.fit(out_dir)
             plot_training_curves(history, out_dir, name)
 
-            # Find optimal threshold on validation set
-            val_true, _, val_prob = collect_predictions(
-                model, val_loader, device, model_type
+            # Temperature scaling on val, then calibrated threshold + test eval
+            temp = calibrate_temperature(model, val_loader, device, model_type)
+            logger.info(f"  Calibration temperature: {temp}")
+
+            val_true, _, val_prob = collect_predictions_calibrated(
+                model, val_loader, device, model_type, temperature=temp
             )
             optimal_thresh = find_optimal_threshold(val_true, val_prob)
             logger.info(f"  Optimal threshold (val F1): {optimal_thresh:.2f}")
 
-            y_true, _, y_prob = collect_predictions(
-                model, test_loader, device, model_type
+            y_true, _, y_prob = collect_predictions_calibrated(
+                model, test_loader, device, model_type, temperature=temp
             )
             y_pred = (y_prob >= optimal_thresh).astype(int)
             metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)
@@ -145,15 +153,18 @@ def step_train(config, logger, device, df, include_unimodal=False):
     history = trainer.fit(out_dir)
     plot_training_curves(history, out_dir, "Multimodal Fusion")
 
-    # Find optimal threshold on validation set
-    val_true, _, val_prob = collect_predictions(
-        fusion_model, val_loader, device, "fast_multimodal"
+    # Temperature scaling on val, then calibrated threshold + test eval
+    temp = calibrate_temperature(fusion_model, val_loader, device, "fast_multimodal")
+    logger.info(f"  Calibration temperature: {temp}")
+
+    val_true, _, val_prob = collect_predictions_calibrated(
+        fusion_model, val_loader, device, "fast_multimodal", temperature=temp
     )
     optimal_thresh = find_optimal_threshold(val_true, val_prob)
     logger.info(f"  Optimal threshold (val F1): {optimal_thresh:.2f}")
 
-    y_true, _, y_prob = collect_predictions(
-        fusion_model, test_loader, device, "fast_multimodal"
+    y_true, _, y_prob = collect_predictions_calibrated(
+        fusion_model, test_loader, device, "fast_multimodal", temperature=temp
     )
     y_pred = (y_prob >= optimal_thresh).astype(int)
     metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)

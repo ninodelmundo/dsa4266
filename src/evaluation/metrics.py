@@ -75,6 +75,96 @@ def find_optimal_threshold(
     return best_threshold
 
 
+def calibrate_temperature(
+    model: torch.nn.Module,
+    dataloader,
+    device: torch.device,
+    model_type: str = "fast_multimodal",
+) -> float:
+    """
+    Fit a single temperature scalar on validation logits to calibrate
+    probabilities (Guo et al., 2017).  Minimises NLL on val set.
+    Returns optimal temperature T (logits / T before softmax).
+    """
+    model.eval()
+    all_logits, all_labels = [], []
+
+    with torch.no_grad():
+        for batch in dataloader:
+            labels = batch["label"].to(device)
+            if model_type == "fast_multimodal":
+                logits = model(
+                    url_tokens=batch["url"].to(device),
+                    url_features=batch["url_features"].to(device),
+                    html_features=batch["html_features"].to(device),
+                    text_emb=batch["text_emb"].to(device),
+                    visual_emb=batch["visual_emb"].to(device),
+                )
+            elif model_type == "url":
+                logits = model(url_tokens=batch["url"].to(device))
+            elif model_type == "fast_text":
+                logits = model(text_emb=batch["text_emb"].to(device))
+            elif model_type == "fast_visual":
+                logits = model(visual_emb=batch["visual_emb"].to(device))
+            else:
+                logits = model(url_tokens=batch["url"].to(device))
+            all_logits.append(logits.cpu())
+            all_labels.append(labels.cpu())
+
+    all_logits = torch.cat(all_logits)
+    all_labels = torch.cat(all_labels)
+
+    # Grid search for T that minimises NLL
+    best_t, best_nll = 1.0, float("inf")
+    for t in np.arange(0.5, 5.01, 0.05):
+        nll = torch.nn.functional.cross_entropy(all_logits / t, all_labels).item()
+        if nll < best_nll:
+            best_nll = nll
+            best_t = t
+    return round(best_t, 2)
+
+
+def collect_predictions_calibrated(
+    model: torch.nn.Module,
+    dataloader,
+    device: torch.device,
+    model_type: str = "fast_multimodal",
+    temperature: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Like collect_predictions but applies temperature scaling to logits."""
+    model.eval()
+    all_labels, all_probs = [], []
+
+    with torch.no_grad():
+        for batch in dataloader:
+            labels = batch["label"].to(device)
+            if model_type == "fast_multimodal":
+                logits = model(
+                    url_tokens=batch["url"].to(device),
+                    url_features=batch["url_features"].to(device),
+                    html_features=batch["html_features"].to(device),
+                    text_emb=batch["text_emb"].to(device),
+                    visual_emb=batch["visual_emb"].to(device),
+                )
+            elif model_type == "url":
+                logits = model(url_tokens=batch["url"].to(device))
+            elif model_type == "fast_text":
+                logits = model(text_emb=batch["text_emb"].to(device))
+            elif model_type == "fast_visual":
+                logits = model(visual_emb=batch["visual_emb"].to(device))
+            else:
+                logits = model(url_tokens=batch["url"].to(device))
+
+            probs = torch.softmax(logits / temperature, dim=-1)[:, 1].cpu().numpy()
+            all_labels.extend(labels.cpu().numpy())
+            all_probs.extend(probs)
+
+    y_true = np.array(all_labels)
+    y_prob = np.array(all_probs)
+    y_pred = (y_prob >= 0.5).astype(int)
+    return y_true, y_pred, y_prob
+
+
 def collect_predictions(
     model: torch.nn.Module,
     dataloader,
@@ -108,6 +198,8 @@ def collect_predictions(
             elif model_type == "fast_multimodal":
                 logits = model(
                     url_tokens=batch["url"].to(device),
+                    url_features=batch["url_features"].to(device),
+                    html_features=batch["html_features"].to(device),
                     text_emb=batch["text_emb"].to(device),
                     visual_emb=batch["visual_emb"].to(device),
                 )

@@ -109,7 +109,7 @@ class URLEncoder(nn.Module):
 
         elif self.model_type == "lstm":
             out, _ = self.lstm(x)       # (B, L, 2H)
-            out = out[:, -1, :]         # last timestep
+            out = out.mean(dim=1)       # mean over all timesteps (better than last-only)
 
         elif self.model_type == "transformer":
             # Create padding mask

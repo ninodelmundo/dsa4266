@@ -6,6 +6,7 @@ from typing import Optional
 from .url_model import build_url_encoder
 from .text_model import TextEncoder
 from .visual_model import VisualEncoder
+from ..data.data_utils import URL_FEATURES_DIM, HTML_FEATURES_DIM
 
 
 class FusionClassifier(nn.Module):
@@ -204,8 +205,9 @@ class FastFusionClassifier(nn.Module):
         self.url_encoder = build_url_encoder(config)
 
         # Per-modality projections from raw feature dimensions
+        # url_proj takes BiLSTM output (url.output_dim) + 9 hand-crafted features
         self.url_proj = nn.Sequential(
-            nn.Linear(config["url"]["output_dim"], self.projected_dim),
+            nn.Linear(config["url"]["output_dim"] + URL_FEATURES_DIM, self.projected_dim),
             nn.ReLU(),
             nn.LayerNorm(self.projected_dim),
         )
@@ -224,10 +226,17 @@ class FastFusionClassifier(nn.Module):
             nn.Linear(self.projected_dim * 2, self.projected_dim),
             nn.LayerNorm(self.projected_dim),
         )
+        # HTML structural features (forms, inputs, password fields, etc.)
+        self.html_proj = nn.Sequential(
+            nn.Linear(HTML_FEATURES_DIM, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.projected_dim),
+            nn.LayerNorm(self.projected_dim),
+        )
 
-        # Fusion-specific parameters
+        # Fusion-specific parameters (4 modalities: url, text, visual, html)
         if self.strategy == "weighted":
-            self.modality_weights = nn.Parameter(torch.ones(3))
+            self.modality_weights = nn.Parameter(torch.ones(4))
         elif self.strategy == "attention":
             self.attention = nn.MultiheadAttention(
                 embed_dim=self.projected_dim,
@@ -239,7 +248,7 @@ class FastFusionClassifier(nn.Module):
 
         # Classifier head
         if self.strategy == "concatenation":
-            classifier_in = self.projected_dim * 3
+            classifier_in = self.projected_dim * 4
         else:
             classifier_in = self.projected_dim
 
@@ -256,20 +265,24 @@ class FastFusionClassifier(nn.Module):
     def forward(
         self,
         url_tokens: torch.Tensor,
+        url_features: torch.Tensor,
+        html_features: torch.Tensor,
         text_emb: torch.Tensor,
         visual_emb: torch.Tensor,
     ) -> torch.Tensor:
-        url_emb = self.url_proj(self.url_encoder(url_tokens))
+        url_raw = torch.cat([self.url_encoder(url_tokens), url_features], dim=-1)
+        url_emb = self.url_proj(url_raw)
         text_emb = self.text_proj(text_emb)
         visual_emb = self.visual_proj(visual_emb)
+        html_emb = self.html_proj(html_features)
 
         if self.strategy == "concatenation":
-            fused = torch.cat([url_emb, text_emb, visual_emb], dim=-1)
+            fused = torch.cat([url_emb, text_emb, visual_emb, html_emb], dim=-1)
         elif self.strategy == "weighted":
             w = F.softmax(self.modality_weights, dim=0)
-            fused = w[0] * url_emb + w[1] * text_emb + w[2] * visual_emb
+            fused = w[0] * url_emb + w[1] * text_emb + w[2] * visual_emb + w[3] * html_emb
         elif self.strategy == "attention":
-            stack = torch.stack([url_emb, text_emb, visual_emb], dim=1)
+            stack = torch.stack([url_emb, text_emb, visual_emb, html_emb], dim=1)
             attended, _ = self.attention(stack, stack, stack)
             attended = self.attention_norm(attended + stack)
             fused = attended.mean(dim=1)
