@@ -10,6 +10,9 @@ import os
 import sys
 import logging
 from pathlib import Path
+from datasets import load_dataset
+import kagglehub
+import shutil
 
 # Load .env before importing kaggle (it reads env vars on import)
 from dotenv import load_dotenv
@@ -22,27 +25,37 @@ RAW_DIR = Path("data/raw")
 
 
 def download_kaggle_dataset(dataset_slug: str, target_dir: Path):
-    """Download and unzip a Kaggle dataset."""
+    """Download a Kaggle dataset using kagglehub and move it to target_dir."""
     try:
-        from kaggle.api.kaggle_api_extended import KaggleApi
 
-        api = KaggleApi()
-        api.authenticate()
+        logger.info(f"Downloading {dataset_slug} using kagglehub...")
+
+        # Download dataset (returns cache path)
+        downloaded_path = kagglehub.dataset_download(dataset_slug)
+
+        logger.info(f"Downloaded to cache: {downloaded_path}")
+
+        # Ensure target directory exists
         target_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Downloading {dataset_slug} -> {target_dir}")
-        api.dataset_download_files(dataset_slug, path=str(target_dir), unzip=True)
-        logger.info(f"Done: {dataset_slug}")
+
+        # Copy contents from kagglehub cache → target_dir
+        for item in Path(downloaded_path).iterdir():
+            dest = target_dir / item.name
+
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest)
+
+        logger.info(f"Dataset copied to: {target_dir}")
+
     except Exception as e:
-        logger.error(
-            f"Could not download {dataset_slug}: {e}\n"
-            "Make sure kaggle is installed and KAGGLE_USERNAME/KAGGLE_KEY are set in .env"
-        )
+        logger.error(f"Could not download {dataset_slug}: {e}")
 
 
 def download_huggingface_dataset():
     """Download URL dataset from HuggingFace — all splits."""
     try:
-        from datasets import load_dataset
 
         logger.info("Downloading URL dataset from HuggingFace...")
         ds = load_dataset("abhinavsarkar/phising-site-datasets")
