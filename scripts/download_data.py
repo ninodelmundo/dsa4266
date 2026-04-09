@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""
-Download datasets from Kaggle and HuggingFace.
-
-Prerequisites:
-  - pip install kaggle datasets python-dotenv
-  - Set KAGGLE_USERNAME and KAGGLE_KEY in .env file
-"""
 import os
 import sys
 import logging
