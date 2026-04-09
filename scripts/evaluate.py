@@ -88,7 +88,7 @@ def main():
 
     all_results = {}
 
-    # ── Evaluate each model ───────────────────────────────────────────────────
+    # Evaluate each model
 
     model_configs = [
         ("URL-Only", URLOnlyClassifier, "url", "URL-Only"),
@@ -130,7 +130,7 @@ def main():
         for k, v in metrics.items():
             logger.info(f"  {k}: {v}")
 
-    # ── Comparative plots ─────────────────────────────────────────────────────
+    # Comparative plots
 
     if len(all_results) > 1:
         plot_roc_curves(all_results, eval_dir)
@@ -138,7 +138,7 @@ def main():
         plot_metrics_comparison(all_results, eval_dir)
         logger.info(f"\nComparative plots saved to {eval_dir}")
 
-    # ── Ablation study ────────────────────────────────────────────────────────
+    # Ablation study
 
     multimodal_ckpt = os.path.join(
         config["project"]["output_dir"], "multimodal", "best_model.pt"
@@ -157,7 +157,7 @@ def main():
                 ablation_results[name] = all_results[name]
         ablation_study_plot(ablation_results, eval_dir)
 
-    # ── Save summary ──────────────────────────────────────────────────────────
+    # Save summary
 
     summary = {}
     for name, data in all_results.items():

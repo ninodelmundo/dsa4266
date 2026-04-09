@@ -40,7 +40,7 @@ class URLEncoder(nn.Module):
         self.projection = nn.Linear(self._encoder_output_dim(), self.output_dim)
         self.layer_norm = nn.LayerNorm(self.output_dim)
 
-    # ── CNN Architecture ──────────────────────────────────────────────────────
+    # CNN Architecture
 
     def _build_cnn(self):
         kernel_sizes = [3, 5, 7]
@@ -91,7 +91,7 @@ class URLEncoder(nn.Module):
         elif self.model_type == "transformer":
             return self._transformer_output_dim
 
-    # ── Forward ───────────────────────────────────────────────────────────────
+    # Forward
 
     def forward(self, url_tokens: torch.Tensor) -> torch.Tensor:
         """

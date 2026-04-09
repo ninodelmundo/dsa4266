@@ -5,7 +5,7 @@ import torch
 from typing import Optional
 
 
-# ── URL Utilities ────────────────────────────────────────────────────────────
+# URL Utilities
 
 URL_CHAR_VOCAB = {
     char: idx + 1  # 0 reserved for padding
@@ -80,7 +80,7 @@ def extract_url_features(url: str) -> dict:
     return parsed
 
 
-# ── Text Utilities ───────────────────────────────────────────────────────────
+# Text Utilities
 
 def clean_html_text(html_content: str) -> str:
     """Extract and clean visible text from raw HTML."""
@@ -105,7 +105,7 @@ def clean_html_text(html_content: str) -> str:
         return re.sub(r"\s+", " ", text).strip()
 
 
-# ── HTML Structural Feature Utilities ────────────────────────────────────────
+# HTML Structural Feature Utilities
 
 HTML_FEATURES_DIM = 8
 
@@ -142,7 +142,7 @@ def extract_html_features(html_content: str) -> torch.Tensor:
     )
 
 
-# ── Image Utilities ──────────────────────────────────────────────────────────
+# Image Utilities
 
 def get_image_transforms(image_size: int = 224, augment: bool = False):
     """Return torchvision transforms for screenshot preprocessing."""

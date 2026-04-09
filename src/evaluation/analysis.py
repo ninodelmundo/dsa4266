@@ -5,9 +5,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
+from sklearn.manifold import TSNE
 from sklearn.metrics import (
     roc_curve,
     precision_recall_curve,
+    precision_recall_fscore_support,
     confusion_matrix,
     classification_report,
 )
@@ -161,6 +163,408 @@ def ablation_study_plot(ablation_results: Dict[str, Dict], output_dir: str):
         )
     plt.tight_layout()
     path = os.path.join(output_dir, "ablation_study.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_class_distribution(df: pd.DataFrame, output_dir: str):
+    """Bar chart showing class balance (or imbalance) per split."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Overall distribution
+    counts = df["label"].value_counts().sort_index()
+    labels = ["Legitimate (0)", "Phishing (1)"]
+    colors = ["#4CAF50", "#F44336"]
+    bars = axes[0].bar(labels, counts.values, color=colors, edgecolor="black")
+    axes[0].set_title("Overall Class Distribution")
+    axes[0].set_ylabel("Count")
+    for bar, val in zip(bars, counts.values):
+        axes[0].text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 5,
+                     str(val), ha="center", fontsize=11, fontweight="bold")
+
+    # Per-split distribution
+    if "split" in df.columns:
+        split_data = df.groupby(["split", "label"]).size().unstack(fill_value=0)
+        split_order = ["train", "val", "test"]
+        split_data = split_data.reindex([s for s in split_order if s in split_data.index])
+        split_data.columns = labels
+        split_data.plot(kind="bar", ax=axes[1], color=colors, edgecolor="black")
+        axes[1].set_title("Class Distribution per Split")
+        axes[1].set_ylabel("Count")
+        axes[1].set_xlabel("")
+        axes[1].legend(title="Class")
+        plt.setp(axes[1].xaxis.get_majorticklabels(), rotation=0)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "class_distribution.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_dataset_stats(df: pd.DataFrame, output_dir: str):
+    """Summary statistics: URL lengths, HTML text lengths, missing data."""
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    # URL length distribution
+    url_lengths = df["url"].astype(str).str.len()
+    axes[0].hist(url_lengths, bins=50, color="steelblue", edgecolor="black", alpha=0.8)
+    axes[0].set_title("URL Length Distribution")
+    axes[0].set_xlabel("Characters")
+    axes[0].set_ylabel("Count")
+    axes[0].axvline(url_lengths.median(), color="red", linestyle="--",
+                    label=f"Median: {url_lengths.median():.0f}")
+    axes[0].legend()
+
+    # HTML content length distribution
+    html_lengths = df["html_content"].astype(str).str.len()
+    axes[1].hist(html_lengths, bins=50, color="coral", edgecolor="black", alpha=0.8)
+    axes[1].set_title("HTML Content Length Distribution")
+    axes[1].set_xlabel("Characters")
+    axes[1].set_ylabel("Count")
+    axes[1].axvline(html_lengths.median(), color="red", linestyle="--",
+                    label=f"Median: {html_lengths.median():.0f}")
+    axes[1].legend()
+
+    # Missing data summary
+    missing = {
+        "URL": df["url"].isna().sum(),
+        "HTML": (df["html_content"].isna() | (df["html_content"] == "")).sum(),
+        "Image": df["image_path"].isna().sum(),
+    }
+    bars = axes[2].bar(missing.keys(), missing.values(), color="#FF9800", edgecolor="black")
+    axes[2].set_title("Missing Data per Modality")
+    axes[2].set_ylabel("Count")
+    for bar, val in zip(bars, missing.values()):
+        axes[2].text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                     str(val), ha="center", fontsize=11)
+
+    plt.tight_layout()
+    path = os.path.join(output_dir, "dataset_stats.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_embedding_tsne(features: dict, output_dir: str, perplexity: int = 30):
+    """t-SNE visualization of fused embeddings to show learned clusters."""
+    import torch
+
+    labels = features["labels"].numpy()
+    text_emb = features["text_embeddings"].numpy()
+    visual_emb = features["visual_embeddings"].numpy()
+
+    # Concatenate text + visual as a proxy for the fused representation
+    combined = np.concatenate([text_emb, visual_emb], axis=1)
+
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, n_iter=1000)
+    coords = tsne.fit_transform(combined)
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    for label, name, color in [(0, "Legitimate", "#4CAF50"), (1, "Phishing", "#F44336")]:
+        mask = labels == label
+        ax.scatter(coords[mask, 0], coords[mask, 1], c=color, label=name,
+                   alpha=0.6, s=20, edgecolors="none")
+    ax.set_title("t-SNE of Combined Text + Visual Embeddings")
+    ax.set_xlabel("t-SNE 1")
+    ax.set_ylabel("t-SNE 2")
+    ax.legend()
+    plt.tight_layout()
+    path = os.path.join(output_dir, "embedding_tsne.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_threshold_sweep(y_true: np.ndarray, y_prob: np.ndarray, output_dir: str):
+    """Show how precision, recall, and F1 change across decision thresholds."""
+    thresholds = np.arange(0.10, 0.91, 0.01)
+    precisions, recalls, f1s = [], [], []
+
+    for t in thresholds:
+        y_pred = (y_prob >= t).astype(int)
+        p, r, f, _ = precision_recall_fscore_support(
+            y_true, y_pred, average="binary", zero_division=0
+        )
+        precisions.append(p)
+        recalls.append(r)
+        f1s.append(f)
+
+    best_idx = np.argmax(f1s)
+    best_t = thresholds[best_idx]
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(thresholds, precisions, label="Precision", color="#2196F3")
+    ax.plot(thresholds, recalls, label="Recall", color="#FF9800")
+    ax.plot(thresholds, f1s, label="F1 Score", color="#4CAF50", linewidth=2)
+    ax.axvline(best_t, color="red", linestyle="--",
+               label=f"Optimal Threshold: {best_t:.2f} (F1={f1s[best_idx]:.3f})")
+    ax.set_xlabel("Decision Threshold")
+    ax.set_ylabel("Score")
+    ax.set_title("Threshold Sweep: Precision / Recall / F1 Tradeoff")
+    ax.legend()
+    ax.set_xlim(0.1, 0.9)
+    ax.set_ylim(0, 1.05)
+    plt.tight_layout()
+    path = os.path.join(output_dir, "threshold_sweep.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_modality_attention_weights(model, features: dict, device, output_dir: str):
+    """Visualize average attention weights across the 4 modalities."""
+    import torch
+
+    model.eval()
+    url_tensors = features["url_tensors"].to(device)
+    url_feats = features["url_features"].to(device)
+    html_feats = features["html_features"].to(device)
+    text_emb = features["text_embeddings"].to(device)
+    visual_emb = features["visual_embeddings"].to(device)
+
+    # Get projected embeddings and attention weights
+    with torch.no_grad():
+        url_raw = torch.cat([model.url_encoder(url_tensors), url_feats], dim=-1)
+        url_e = model.url_proj(url_raw)
+        text_e = model.text_proj(text_emb)
+        visual_e = model.visual_proj(visual_emb)
+        html_e = model.html_proj(html_feats)
+
+        stack = torch.stack([url_e, text_e, visual_e, html_e], dim=1)
+        _, attn_weights = model.attention(stack, stack, stack, need_weights=True)
+
+    # Average attention across all samples and heads: (4, 4)
+    avg_attn = attn_weights.mean(dim=0).cpu().numpy()
+
+    modalities = ["URL", "Text", "Visual", "HTML"]
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sns.heatmap(avg_attn, annot=True, fmt=".3f", cmap="YlOrRd",
+                xticklabels=modalities, yticklabels=modalities, ax=ax)
+    ax.set_title("Average Cross-Modal Attention Weights")
+    ax.set_xlabel("Key (attends to)")
+    ax.set_ylabel("Query (from)")
+    plt.tight_layout()
+    path = os.path.join(output_dir, "attention_weights.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_prediction_confidence(y_true: np.ndarray, y_prob: np.ndarray, output_dir: str):
+    """Histogram of predicted probabilities split by true class.
+    Shows whether the model is confident and well-calibrated."""
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    legit_probs = y_prob[y_true == 0]
+    phish_probs = y_prob[y_true == 1]
+
+    ax.hist(legit_probs, bins=30, alpha=0.7, color="#4CAF50", label="Legitimate", edgecolor="black")
+    ax.hist(phish_probs, bins=30, alpha=0.7, color="#F44336", label="Phishing", edgecolor="black")
+    ax.axvline(0.5, color="black", linestyle="--", linewidth=1.5, label="Default threshold (0.5)")
+    ax.set_xlabel("Predicted Phishing Probability")
+    ax.set_ylabel("Count")
+    ax.set_title("Prediction Confidence Distribution by True Class")
+    ax.legend()
+    plt.tight_layout()
+    path = os.path.join(output_dir, "prediction_confidence.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def plot_feature_correlation(features: dict, df: pd.DataFrame, output_dir: str):
+    """Correlation heatmap of hand-crafted URL + HTML features with the label."""
+    url_feat_names = ["url_length", "dots", "hyphens", "slashes", "digits",
+                      "special_chars", "has_ip", "has_https", "subdomain_count"]
+    html_feat_names = ["form_count", "input_count", "has_password", "script_count",
+                       "iframe_count", "meta_refresh", "ext_link_ratio", "text_length"]
+
+    url_np = features["url_features"].numpy()
+    html_np = features["html_features"].numpy()
+    labels = features["labels"].numpy()
+
+    all_features = np.concatenate([url_np, html_np, labels.reshape(-1, 1)], axis=1)
+    col_names = url_feat_names + html_feat_names + ["label"]
+    feat_df = pd.DataFrame(all_features, columns=col_names)
+
+    corr = feat_df.corr()
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+    sns.heatmap(corr, mask=mask, annot=True, fmt=".2f", cmap="RdBu_r",
+                center=0, square=True, ax=ax, vmin=-1, vmax=1,
+                cbar_kws={"shrink": 0.8})
+    ax.set_title("Feature Correlation Heatmap (URL + HTML Features + Label)")
+    plt.tight_layout()
+    path = os.path.join(output_dir, "feature_correlation.png")
+    plt.savefig(path, dpi=150)
+    plt.close()
+    return path
+
+
+def save_results_summary(all_results: Dict[str, Dict], output_dir: str):
+    """Save a clean CSV + text summary of all model metrics."""
+    rows = []
+    for name, data in all_results.items():
+        m = data["metrics"]
+        rows.append({
+            "Model": name,
+            "F1": round(m["f1"], 4),
+            "ROC-AUC": round(m["roc_auc"], 4),
+            "Accuracy": round(m["accuracy"], 4),
+            "Precision": round(m["precision"], 4),
+            "Recall": round(m["recall"], 4),
+            "PR-AUC": round(m.get("pr_auc", 0), 4),
+            "Threshold": round(m["threshold"], 2),
+            "TP": m["tp"],
+            "FP": m["fp"],
+            "FN": m["fn"],
+            "TN": m["tn"],
+        })
+
+    results_df = pd.DataFrame(rows)
+    csv_path = os.path.join(output_dir, "results_summary.csv")
+    results_df.to_csv(csv_path, index=False)
+
+    # Also save a formatted text version
+    txt_path = os.path.join(output_dir, "results_summary.txt")
+    with open(txt_path, "w") as f:
+        f.write("=" * 80 + "\n")
+        f.write("PHISHING DETECTION - FINAL RESULTS SUMMARY\n")
+        f.write("=" * 80 + "\n\n")
+        for _, row in results_df.iterrows():
+            f.write(f"Model: {row['Model']}\n")
+            f.write(f"  F1: {row['F1']:.4f}  |  ROC-AUC: {row['ROC-AUC']:.4f}  |  Accuracy: {row['Accuracy']:.4f}\n")
+            f.write(f"  Precision: {row['Precision']:.4f}  |  Recall: {row['Recall']:.4f}  |  PR-AUC: {row['PR-AUC']:.4f}\n")
+            f.write(f"  Threshold: {row['Threshold']:.2f}\n")
+            f.write(f"  Confusion: TP={row['TP']}  FP={row['FP']}  FN={row['FN']}  TN={row['TN']}\n\n")
+
+    return csv_path, txt_path
+
+
+def save_misclassification_analysis(
+    all_results: Dict[str, Dict], df: pd.DataFrame, output_dir: str
+):
+    """Save examples of misclassified samples for error analysis."""
+    if "Multimodal" not in all_results:
+        return None
+
+    data = all_results["Multimodal"]
+    y_true = data["y_true"]
+    y_pred = data["y_pred"]
+    y_prob = data["y_prob"]
+
+    test_df = df[df["split"] == "test"].reset_index(drop=True)
+    if len(test_df) != len(y_true):
+        return None
+
+    test_df = test_df.copy()
+    test_df["predicted"] = y_pred
+    test_df["prob_phishing"] = np.round(y_prob, 4)
+    test_df["correct"] = (y_true == y_pred)
+
+    # False positives: legitimate flagged as phishing
+    fp = test_df[(test_df["label"] == 0) & (test_df["predicted"] == 1)].copy()
+    fp = fp.sort_values("prob_phishing", ascending=False)
+
+    # False negatives: phishing missed
+    fn = test_df[(test_df["label"] == 1) & (test_df["predicted"] == 0)].copy()
+    fn = fn.sort_values("prob_phishing", ascending=True)
+
+    txt_path = os.path.join(output_dir, "misclassification_analysis.txt")
+    with open(txt_path, "w") as f:
+        f.write("MISCLASSIFICATION ANALYSIS (Multimodal Model)\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"Total test samples: {len(test_df)}\n")
+        f.write(f"Correct: {test_df['correct'].sum()} ({test_df['correct'].mean()*100:.1f}%)\n")
+        f.write(f"False Positives (legit flagged as phishing): {len(fp)}\n")
+        f.write(f"False Negatives (phishing missed): {len(fn)}\n\n")
+
+        f.write("-" * 70 + "\n")
+        f.write(f"TOP FALSE POSITIVES (most confident mistakes)\n")
+        f.write("-" * 70 + "\n")
+        for _, row in fp.head(10).iterrows():
+            url = str(row["url"])[:100]
+            f.write(f"  URL: {url}\n")
+            f.write(f"  P(phishing): {row['prob_phishing']:.4f}\n\n")
+
+        f.write("-" * 70 + "\n")
+        f.write(f"TOP FALSE NEGATIVES (phishing the model missed)\n")
+        f.write("-" * 70 + "\n")
+        for _, row in fn.head(10).iterrows():
+            url = str(row["url"])[:100]
+            f.write(f"  URL: {url}\n")
+            f.write(f"  P(phishing): {row['prob_phishing']:.4f}\n\n")
+
+    return txt_path
+
+
+def save_model_architecture_summary(model, config: dict, output_dir: str):
+    """Save model architecture details and parameter counts."""
+    txt_path = os.path.join(output_dir, "model_architecture.txt")
+
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    with open(txt_path, "w") as f:
+        f.write("MODEL ARCHITECTURE SUMMARY\n")
+        f.write("=" * 70 + "\n\n")
+        f.write(f"Total parameters: {total_params:,}\n")
+        f.write(f"Trainable parameters: {trainable_params:,}\n\n")
+
+        f.write("Configuration:\n")
+        f.write(f"  Fusion strategy: {config['fusion']['strategy']}\n")
+        f.write(f"  Projected dimension: {config['fusion']['projected_dim']}\n")
+        f.write(f"  Hidden dimension: {config['fusion']['hidden_dim']}\n")
+        f.write(f"  Dropout: {config['fusion']['dropout']}\n")
+        f.write(f"  Learning rate: {config['training']['learning_rate']}\n")
+        f.write(f"  Batch size: {config['training']['batch_size']}\n")
+        f.write(f"  Weight decay: {config['training']['weight_decay']}\n\n")
+
+        f.write("Modalities:\n")
+        f.write(f"  URL: BiLSTM ({config['url']['hidden_dim']}d x2 bidir) + 9 hand-crafted features\n")
+        f.write(f"  Text: DistilBERT mean-pooled (768d, frozen)\n")
+        f.write(f"  Visual: EfficientNet-B0 (1280d, frozen)\n")
+        f.write(f"  HTML: 8 structural features\n\n")
+
+        f.write("Layer-by-layer:\n")
+        f.write("-" * 70 + "\n")
+        for name, param in model.named_parameters():
+            f.write(f"  {name:50s}  {str(list(param.shape)):>20s}  {'trainable' if param.requires_grad else 'frozen'}\n")
+
+    return txt_path
+
+
+def plot_learning_rate_schedule(config: dict, output_dir: str):
+    """Visualize the cosine annealing LR schedule."""
+    import torch
+
+    num_epochs = config["training"]["num_epochs"]
+    lr = float(config["training"]["learning_rate"])
+
+    # Simulate the schedule
+    dummy_param = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.AdamW([dummy_param], lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=num_epochs, eta_min=1e-6
+    )
+
+    lrs = []
+    for _ in range(num_epochs):
+        lrs.append(optimizer.param_groups[0]["lr"])
+        scheduler.step()
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(range(1, num_epochs + 1), lrs, color="steelblue", linewidth=2)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Learning Rate")
+    ax.set_title("Cosine Annealing Learning Rate Schedule")
+    ax.set_yscale("log")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    path = os.path.join(output_dir, "lr_schedule.png")
     plt.savefig(path, dpi=150)
     plt.close()
     return path

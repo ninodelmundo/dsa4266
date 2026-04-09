@@ -69,7 +69,7 @@ class PhishingDatasetLoader:
             logger.info(f"Loading cached merged dataset from {cache_path}")
             return pd.read_csv(cache_path)
 
-        # ── 1. Load HuggingFace URL data with split info ─────────────────
+        # 1. Load HuggingFace URL data with split info
         urls_dir = self.raw_dir / "urls"
         dfs = []
         for split_name, filename in [
@@ -98,7 +98,7 @@ class PhishingDatasetLoader:
         )
         logger.info(f"Total HF entries: {len(df_hf)}")
 
-        # ── 2. Build file indexes for HTML and screenshots ───────────────
+        # 2. Build file indexes for HTML and screenshots
         html_dirs = _find_label_dirs(self.raw_dir / "html_content")
         img_dirs = _find_label_dirs(self.raw_dir / "screenshots")
 
@@ -118,7 +118,7 @@ class PhishingDatasetLoader:
                 img_index[(folder_name, idx)] = path
             logger.info(f"  Screenshots {folder_name}: {len(file_map)} files")
 
-        # ── 3. Match each HF entry to HTML + image by index ──────────────
+        # 3. Match each HF entry to HTML + image by index
         df_hf["html_path"] = df_hf.apply(
             lambda r: html_index.get((r["folder"], r["filename_index"])),
             axis=1,
@@ -132,7 +132,7 @@ class PhishingDatasetLoader:
         has_img = df_hf["image_path"].notna().sum()
         logger.info(f"Matched HTML: {has_html} | Matched image: {has_img}")
 
-        # ── 4. Keep only entries with BOTH HTML and image ────────────────
+        # 4. Keep only entries with BOTH HTML and image
         merged = df_hf.dropna(subset=["html_path", "image_path"]).reset_index(
             drop=True
         )
@@ -155,7 +155,7 @@ class PhishingDatasetLoader:
             ["url", "label", "split", "filename_index", "html_content", "image_path"]
         ]
 
-        # ── 5. Summary ──────────────────────────────────────────────────
+        # 5. Summary
         for split in ["train", "val", "test"]:
             subset = merged[merged["split"] == split]
             if len(subset) > 0:
