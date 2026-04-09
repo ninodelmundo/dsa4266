@@ -38,18 +38,18 @@ visual:
 
 fusion:
   strategy: "attention"  # options: "concatenation", "weighted", "attention"
-  projected_dim: 256
-  hidden_dim: 512
-  dropout: 0.4
+  projected_dim: 128
+  hidden_dim: 256
+  dropout: 0.5
   num_classes: 2
 
 training:
-  batch_size: 32
-  num_epochs: 30
-  learning_rate: 1e-3
+  batch_size: 16
+  num_epochs: 50
+  learning_rate: 5e-4
   bert_learning_rate: 2e-5  # lower LR for pre-trained BERT layers
-  weight_decay: 1e-4
-  patience: 7  # early stopping
+  weight_decay: 5e-4
+  patience: 10  # early stopping
   gradient_clip: 1.0
   class_weights: true  # handle class imbalance
   decision_threshold: 0.5

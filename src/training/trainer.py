@@ -75,9 +75,9 @@ class Trainer:
         # Optimizer — use different LR for BERT layers
         self.optimizer = self._build_optimizer(train_cfg)
 
-        # Scheduler
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode="min", factor=0.5, patience=3
+        # Scheduler — cosine annealing gives smoother LR decay than ReduceLROnPlateau
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=self.num_epochs, eta_min=1e-6
         )
 
         # Callbacks
@@ -142,6 +142,22 @@ class Trainer:
         elif self.model_type == "fast_visual":
             return self.model(visual_emb=batch["visual_emb"].to(self.device))
 
+    def _mixup_forward(self, batch, labels):
+        """Forward pass with manifold mixup for fast_multimodal."""
+        lam = np.random.beta(0.2, 0.2)
+        index = torch.randperm(labels.size(0)).to(self.device)
+        logits = self.model(
+            url_tokens=batch["url"].to(self.device),
+            url_features=batch["url_features"].to(self.device),
+            html_features=batch["html_features"].to(self.device),
+            text_emb=batch["text_emb"].to(self.device),
+            visual_emb=batch["visual_emb"].to(self.device),
+            mixup_lambda=lam,
+            mixup_index=index,
+        )
+        loss = lam * self.criterion(logits, labels) + (1 - lam) * self.criterion(logits, labels[index])
+        return logits, loss
+
     def train_epoch(self) -> Tuple[float, Dict]:
         """Train for one epoch."""
         self.model.train()
@@ -153,8 +169,14 @@ class Trainer:
             labels = batch["label"].to(self.device)
 
             self.optimizer.zero_grad()
-            logits = self._forward_batch(batch)
-            loss = self.criterion(logits, labels)
+
+            # Use manifold mixup for fast_multimodal during training
+            if self.model_type == "fast_multimodal":
+                logits, loss = self._mixup_forward(batch, labels)
+            else:
+                logits = self._forward_batch(batch)
+                loss = self.criterion(logits, labels)
+
             loss.backward()
 
             # Gradient clipping
@@ -223,7 +245,7 @@ class Trainer:
             train_loss, train_metrics = self.train_epoch()
             val_loss, val_metrics = self.validate()
 
-            self.scheduler.step(val_loss)
+            self.scheduler.step()
 
             elapsed = time.time() - start
             logger.info(

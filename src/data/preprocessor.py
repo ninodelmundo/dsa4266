@@ -1,9 +1,18 @@
+import gc
 import logging
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
 from PIL import Image
+from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models
+from torchvision.models import EfficientNet_B0_Weights
+from tqdm import tqdm
+from transformers import AutoModel, AutoTokenizer
 from typing import Dict, Tuple
 
 from .data_utils import (
@@ -128,7 +137,6 @@ def create_dataloaders(
         val_df = df[df["split"] == "val"]
         test_df = df[df["split"] == "test"]
     else:
-        from sklearn.model_selection import train_test_split
         train_df, temp_df = train_test_split(df, test_size=0.3, stratify=df["label"], random_state=42)
         val_df, test_df = train_test_split(temp_df, test_size=0.5, stratify=temp_df["label"], random_state=42)
 
@@ -148,21 +156,16 @@ def create_dataloaders(
 
 
 def compute_class_weights(df: pd.DataFrame, device: torch.device) -> torch.Tensor:
-    from sklearn.utils.class_weight import compute_class_weight
     train_labels = df[df["split"] == "train"]["label"].values if "split" in df.columns else df["label"].values
     weights = compute_class_weight("balanced", classes=np.array([0, 1]), y=train_labels)
     return torch.tensor(weights, dtype=torch.float32).to(device)
 
 
-# ── Fast Pipeline: Pre-extracted Embeddings ─────────────────────────────────
+# Fast Pipeline: Pre-extracted Embeddings
 
 
 def _extract_text_embeddings(df: pd.DataFrame, config: dict) -> torch.Tensor:
     """Extract DistilBERT [CLS] embeddings once for all samples."""
-    import gc
-    from transformers import AutoModel, AutoTokenizer
-    from tqdm import tqdm
-
     text_cfg = config["text"]
     logger.info("  Loading DistilBERT tokenizer + model...")
     tokenizer = AutoTokenizer.from_pretrained(text_cfg["model_name"])
@@ -205,12 +208,6 @@ def _extract_text_embeddings(df: pd.DataFrame, config: dict) -> torch.Tensor:
 
 def _extract_visual_embeddings(df: pd.DataFrame, config: dict) -> torch.Tensor:
     """Extract EfficientNet pooled features once for all samples."""
-    import gc
-    from torchvision import models
-    from torchvision.models import EfficientNet_B0_Weights
-    from PIL import Image
-    from tqdm import tqdm
-
     visual_cfg = config["visual"]
     image_size = visual_cfg["image_size"]
     transform = get_image_transforms(image_size, augment=False)
@@ -248,8 +245,6 @@ def extract_and_save_features(df: pd.DataFrame, config: dict) -> dict:
     One-time extraction of frozen DistilBERT and EfficientNet embeddings.
     Cached to disk — subsequent runs load instantly.
     """
-    from pathlib import Path
-
     processed_dir = Path(config["data"]["processed_dir"])
     features_path = processed_dir / "features.pt"
 

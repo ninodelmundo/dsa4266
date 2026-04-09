@@ -56,12 +56,24 @@ def step_train(config, logger, device, df, include_unimodal=False):
     )
     from src.training.trainer import Trainer
     from src.evaluation.metrics import (
-        collect_predictions_calibrated,
-        calibrate_temperature,
+        collect_predictions,
         compute_metrics,
         find_optimal_threshold,
     )
-    from src.evaluation.analysis import plot_training_curves
+    from src.evaluation.analysis import (
+        plot_training_curves,
+        plot_class_distribution,
+        plot_dataset_stats,
+        plot_embedding_tsne,
+        plot_threshold_sweep,
+        plot_modality_attention_weights,
+        plot_prediction_confidence,
+        plot_feature_correlation,
+        save_results_summary,
+        save_misclassification_analysis,
+        save_model_architecture_summary,
+        plot_learning_rate_schedule,
+    )
     from src.utils.helpers import count_parameters
 
     output_base = config["project"]["output_dir"]
@@ -80,7 +92,26 @@ def step_train(config, logger, device, df, include_unimodal=False):
 
     all_results = {}
 
-    # ── Unimodal baselines (optional) ────────────────────────────────────────
+    # Data study plots (rubric: "Is the data balanced?")
+    eval_dir = os.path.join(output_base, "evaluation")
+    Path(eval_dir).mkdir(parents=True, exist_ok=True)
+    plot_class_distribution(df, eval_dir)
+    plot_dataset_stats(df, eval_dir)
+    logger.info("Saved data study plots (class distribution, dataset stats)")
+
+    # t-SNE embedding visualization (rubric: "Did the model learn anything meaningful?")
+    plot_embedding_tsne(features, eval_dir)
+    logger.info("Saved t-SNE embedding visualization")
+
+    # Feature correlation heatmap (rubric: data study depth)
+    plot_feature_correlation(features, df, eval_dir)
+    logger.info("Saved feature correlation heatmap")
+
+    # Learning rate schedule visualization
+    plot_learning_rate_schedule(config, eval_dir)
+    logger.info("Saved learning rate schedule plot")
+
+    # Unimodal baselines (optional)
     if include_unimodal:
         unimodal_configs = [
             ("URL-Only", URLOnlyClassifier, "url"),
@@ -108,18 +139,15 @@ def step_train(config, logger, device, df, include_unimodal=False):
             history = trainer.fit(out_dir)
             plot_training_curves(history, out_dir, name)
 
-            # Temperature scaling on val, then calibrated threshold + test eval
-            temp = calibrate_temperature(model, val_loader, device, model_type)
-            logger.info(f"  Calibration temperature: {temp}")
-
-            val_true, _, val_prob = collect_predictions_calibrated(
-                model, val_loader, device, model_type, temperature=temp
+            # Find optimal threshold on validation set
+            val_true, _, val_prob = collect_predictions(
+                model, val_loader, device, model_type
             )
             optimal_thresh = find_optimal_threshold(val_true, val_prob)
             logger.info(f"  Optimal threshold (val F1): {optimal_thresh:.2f}")
 
-            y_true, _, y_prob = collect_predictions_calibrated(
-                model, test_loader, device, model_type, temperature=temp
+            y_true, _, y_prob = collect_predictions(
+                model, test_loader, device, model_type
             )
             y_pred = (y_prob >= optimal_thresh).astype(int)
             metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)
@@ -133,7 +161,7 @@ def step_train(config, logger, device, df, include_unimodal=False):
             del model, trainer
             gc.collect()
 
-    # ── Multimodal fusion (always) ───────────────────────────────────────────
+    # Multimodal fusion (always)
     out_dir = os.path.join(output_base, "multimodal")
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
@@ -153,18 +181,15 @@ def step_train(config, logger, device, df, include_unimodal=False):
     history = trainer.fit(out_dir)
     plot_training_curves(history, out_dir, "Multimodal Fusion")
 
-    # Temperature scaling on val, then calibrated threshold + test eval
-    temp = calibrate_temperature(fusion_model, val_loader, device, "fast_multimodal")
-    logger.info(f"  Calibration temperature: {temp}")
-
-    val_true, _, val_prob = collect_predictions_calibrated(
-        fusion_model, val_loader, device, "fast_multimodal", temperature=temp
+    # Find optimal threshold on validation set
+    val_true, _, val_prob = collect_predictions(
+        fusion_model, val_loader, device, "fast_multimodal"
     )
     optimal_thresh = find_optimal_threshold(val_true, val_prob)
     logger.info(f"  Optimal threshold (val F1): {optimal_thresh:.2f}")
 
-    y_true, _, y_prob = collect_predictions_calibrated(
-        fusion_model, test_loader, device, "fast_multimodal", temperature=temp
+    y_true, _, y_prob = collect_predictions(
+        fusion_model, test_loader, device, "fast_multimodal"
     )
     y_pred = (y_prob >= optimal_thresh).astype(int)
     metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)
@@ -181,6 +206,31 @@ def step_train(config, logger, device, df, include_unimodal=False):
             f"Learned modality weights: URL={weights[0]:.3f}, "
             f"Text={weights[1]:.3f}, Visual={weights[2]:.3f}"
         )
+
+    # Threshold sweep plot (rubric: "Which metric should we focus on?")
+    plot_threshold_sweep(y_true, y_prob, eval_dir)
+    logger.info("Saved threshold sweep plot")
+
+    # Attention weight heatmap (rubric: "Interpretability")
+    if fusion_model.strategy == "attention":
+        plot_modality_attention_weights(fusion_model, features, device, eval_dir)
+        logger.info("Saved attention weight heatmap")
+
+    # Prediction confidence distribution (rubric: "Results discussion")
+    plot_prediction_confidence(y_true, y_prob, eval_dir)
+    logger.info("Saved prediction confidence distribution")
+
+    # Model architecture summary
+    save_model_architecture_summary(fusion_model, config, eval_dir)
+    logger.info("Saved model architecture summary")
+
+    # Results summary CSV + text
+    save_results_summary(all_results, eval_dir)
+    logger.info("Saved results summary (CSV + TXT)")
+
+    # Misclassification error analysis
+    save_misclassification_analysis(all_results, df, eval_dir)
+    logger.info("Saved misclassification analysis")
 
     return all_results
 

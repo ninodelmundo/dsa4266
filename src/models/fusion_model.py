@@ -43,7 +43,7 @@ class FusionClassifier(nn.Module):
         text_dim = config["text"]["output_dim"]
         visual_dim = config["visual"]["output_dim"]
 
-        # ── Per-modality projection to common dim ─────────────────────────────
+        # Per-modality projection to common dim
         self.url_proj = nn.Sequential(
             nn.Linear(url_dim, self.projected_dim),
             nn.ReLU(),
@@ -60,7 +60,7 @@ class FusionClassifier(nn.Module):
             nn.LayerNorm(self.projected_dim),
         )
 
-        # ── Fusion-specific parameters ────────────────────────────────────────
+        # Fusion-specific parameters
         if self.strategy == "weighted":
             self.modality_weights = nn.Parameter(torch.ones(3))
 
@@ -73,7 +73,7 @@ class FusionClassifier(nn.Module):
             )
             self.attention_norm = nn.LayerNorm(self.projected_dim)
 
-        # ── Classifier head ───────────────────────────────────────────────────
+        # Classifier head
         if self.strategy == "concatenation":
             classifier_in = self.projected_dim * 3
         else:
@@ -100,14 +100,14 @@ class FusionClassifier(nn.Module):
         Returns:
             logits: (batch, 2)
         """
-        # ── Encode each modality ──────────────────────────────────────────────
+        # Encode each modality
         url_emb = self.url_proj(self.url_encoder(url_tokens))       # (B, D)
         text_emb = self.text_proj(
             self.text_encoder(input_ids, attention_mask)
         )                                                            # (B, D)
         visual_emb = self.visual_proj(self.visual_encoder(images))   # (B, D)
 
-        # ── Fuse ──────────────────────────────────────────────────────────────
+        # Fuse
         if self.strategy == "concatenation":
             fused = torch.cat(
                 [url_emb, text_emb, visual_emb], dim=-1
@@ -135,7 +135,7 @@ class FusionClassifier(nn.Module):
         return None
 
 
-# ── Unimodal Wrappers for single-modality baselines ─────────────────────────
+# Unimodal Wrappers for single-modality baselines
 
 
 class URLOnlyClassifier(nn.Module):
@@ -183,7 +183,7 @@ class VisualOnlyClassifier(nn.Module):
         return self.classifier(self.encoder(images))
 
 
-# ── Fast variants using pre-extracted embeddings ─────────────────────────────
+# Fast variants using pre-extracted embeddings
 
 
 class FastFusionClassifier(nn.Module):
@@ -209,28 +209,26 @@ class FastFusionClassifier(nn.Module):
         self.url_proj = nn.Sequential(
             nn.Linear(config["url"]["output_dim"] + URL_FEATURES_DIM, self.projected_dim),
             nn.ReLU(),
+            nn.Dropout(self.dropout_p),
             nn.LayerNorm(self.projected_dim),
         )
         self.text_proj = nn.Sequential(
-            nn.Linear(768, self.projected_dim * 2),
+            nn.Linear(768, self.projected_dim),
             nn.ReLU(),
-            nn.Dropout(config["text"]["dropout"]),
-            nn.Linear(self.projected_dim * 2, self.projected_dim),
+            nn.Dropout(self.dropout_p),
             nn.LayerNorm(self.projected_dim),
         )
         self.visual_proj = nn.Sequential(
-            nn.Dropout(config["visual"]["dropout"]),
-            nn.Linear(1280, self.projected_dim * 2),
+            nn.Linear(1280, self.projected_dim),
             nn.ReLU(),
-            nn.Dropout(config["visual"]["dropout"]),
-            nn.Linear(self.projected_dim * 2, self.projected_dim),
+            nn.Dropout(self.dropout_p),
             nn.LayerNorm(self.projected_dim),
         )
         # HTML structural features (forms, inputs, password fields, etc.)
         self.html_proj = nn.Sequential(
-            nn.Linear(HTML_FEATURES_DIM, 64),
+            nn.Linear(HTML_FEATURES_DIM, self.projected_dim),
             nn.ReLU(),
-            nn.Linear(64, self.projected_dim),
+            nn.Dropout(self.dropout_p),
             nn.LayerNorm(self.projected_dim),
         )
 
@@ -256,10 +254,7 @@ class FastFusionClassifier(nn.Module):
             nn.Linear(classifier_in, self.hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
-            nn.Linear(self.hidden_dim, self.hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(self.dropout_p),
-            nn.Linear(self.hidden_dim // 2, 2),
+            nn.Linear(self.hidden_dim, 2),
         )
 
     def forward(
@@ -269,12 +264,21 @@ class FastFusionClassifier(nn.Module):
         html_features: torch.Tensor,
         text_emb: torch.Tensor,
         visual_emb: torch.Tensor,
+        mixup_lambda: float = None,
+        mixup_index: torch.Tensor = None,
     ) -> torch.Tensor:
         url_raw = torch.cat([self.url_encoder(url_tokens), url_features], dim=-1)
         url_emb = self.url_proj(url_raw)
         text_emb = self.text_proj(text_emb)
         visual_emb = self.visual_proj(visual_emb)
         html_emb = self.html_proj(html_features)
+
+        # Manifold mixup: blend projected embeddings to create synthetic samples
+        if mixup_lambda is not None and mixup_index is not None:
+            url_emb = mixup_lambda * url_emb + (1 - mixup_lambda) * url_emb[mixup_index]
+            text_emb = mixup_lambda * text_emb + (1 - mixup_lambda) * text_emb[mixup_index]
+            visual_emb = mixup_lambda * visual_emb + (1 - mixup_lambda) * visual_emb[mixup_index]
+            html_emb = mixup_lambda * html_emb + (1 - mixup_lambda) * html_emb[mixup_index]
 
         if self.strategy == "concatenation":
             fused = torch.cat([url_emb, text_emb, visual_emb, html_emb], dim=-1)
