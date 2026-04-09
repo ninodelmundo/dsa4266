@@ -50,7 +50,7 @@ def step_train(config, logger, device, df, include_unimodal=False):
     )
     from src.models.fusion_model import (
         FastFusionClassifier,
-        URLOnlyClassifier,
+        FastURLOnlyClassifier,
         FastTextOnlyClassifier,
         FastVisualOnlyClassifier,
     )
@@ -63,12 +63,13 @@ def step_train(config, logger, device, df, include_unimodal=False):
     )
     from src.evaluation.analysis import plot_training_curves
     from src.utils.helpers import count_parameters
+    from src.experiments.common import get_metric_weights, limit_dataset
 
     output_base = config["project"]["output_dir"]
+    metric_weights = get_metric_weights(config)
 
     max_samples = config["data"].get("max_samples")
-    if max_samples:
-        df = df.head(max_samples)
+    df = limit_dataset(df, max_samples, seed=config["project"]["seed"])
 
     # Extract frozen DistilBERT + EfficientNet embeddings once (cached)
     features = extract_and_save_features(df, config)
@@ -83,7 +84,7 @@ def step_train(config, logger, device, df, include_unimodal=False):
     # ── Unimodal baselines (optional) ────────────────────────────────────────
     if include_unimodal:
         unimodal_configs = [
-            ("URL-Only", URLOnlyClassifier, "url"),
+            ("URL-Only", FastURLOnlyClassifier, "fast_url"),
             ("Text-Only", FastTextOnlyClassifier, "fast_text"),
             ("Visual-Only", FastVisualOnlyClassifier, "fast_visual"),
         ]
@@ -104,6 +105,9 @@ def step_train(config, logger, device, df, include_unimodal=False):
                 val_loader=val_loader,
                 class_weights=class_weights,
                 model_type=model_type,
+                metric_weights=metric_weights,
+                checkpoint_metric=config["training"].get("checkpoint_metric", "val_loss"),
+                use_amp=config.get("runtime", {}).get("amp", False),
             )
             history = trainer.fit(out_dir)
             plot_training_curves(history, out_dir, name)
@@ -122,7 +126,13 @@ def step_train(config, logger, device, df, include_unimodal=False):
                 model, test_loader, device, model_type, temperature=temp
             )
             y_pred = (y_prob >= optimal_thresh).astype(int)
-            metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)
+            metrics = compute_metrics(
+                y_true,
+                y_pred,
+                y_prob,
+                optimal_thresh,
+                metric_weights=metric_weights,
+            )
             all_results[name] = {
                 "y_true": y_true,
                 "y_pred": y_pred,
@@ -149,6 +159,9 @@ def step_train(config, logger, device, df, include_unimodal=False):
         val_loader=val_loader,
         class_weights=class_weights,
         model_type="fast_multimodal",
+        metric_weights=metric_weights,
+        checkpoint_metric=config["training"].get("checkpoint_metric", "val_loss"),
+        use_amp=config.get("runtime", {}).get("amp", False),
     )
     history = trainer.fit(out_dir)
     plot_training_curves(history, out_dir, "Multimodal Fusion")
@@ -167,7 +180,13 @@ def step_train(config, logger, device, df, include_unimodal=False):
         fusion_model, test_loader, device, "fast_multimodal", temperature=temp
     )
     y_pred = (y_prob >= optimal_thresh).astype(int)
-    metrics = compute_metrics(y_true, y_pred, y_prob, optimal_thresh)
+    metrics = compute_metrics(
+        y_true,
+        y_pred,
+        y_prob,
+        optimal_thresh,
+        metric_weights=metric_weights,
+    )
     all_results["Multimodal"] = {
         "y_true": y_true,
         "y_pred": y_pred,
@@ -177,10 +196,12 @@ def step_train(config, logger, device, df, include_unimodal=False):
 
     weights = fusion_model.get_modality_weights()
     if weights is not None:
-        logger.info(
-            f"Learned modality weights: URL={weights[0]:.3f}, "
-            f"Text={weights[1]:.3f}, Visual={weights[2]:.3f}"
+        active_modalities = fusion_model.get_active_modalities()
+        weight_log = ", ".join(
+            f"{name}={weight:.3f}"
+            for name, weight in zip(active_modalities, weights.tolist())
         )
+        logger.info(f"Learned modality weights: {weight_log}")
 
     return all_results
 

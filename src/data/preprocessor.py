@@ -2,9 +2,9 @@ import logging
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from PIL import Image
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 from .data_utils import (
     url_to_tensor,
@@ -68,13 +68,18 @@ class PhishingMultiModalDataset(Dataset):
         labels: torch.Tensor,
         image_size: int,
         augment: bool = False,
+        augment_config: Optional[dict] = None,
     ):
         self.input_ids = input_ids
         self.attention_mask = attention_mask
         self.url_tensors = url_tensors
         self.image_paths = image_paths
         self.labels = labels
-        self.transform = get_image_transforms(image_size, augment=augment)
+        self.transform = get_image_transforms(
+            image_size,
+            augment=augment,
+            augment_config=augment_config,
+        )
         self.image_size = image_size
 
     def __len__(self):
@@ -112,6 +117,19 @@ def _make_dataset(df, tokenizer, config, split_name):
         labels=labels,
         image_size=config["visual"]["image_size"],
         augment=(split_name == "train"),
+        augment_config=config.get("augmentation", {}),
+    )
+
+
+def _build_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
+    class_counts = np.bincount(labels, minlength=2)
+    class_counts = np.maximum(class_counts, 1)
+    class_weights = 1.0 / class_counts
+    sample_weights = class_weights[labels]
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
     )
 
 
@@ -119,9 +137,12 @@ def create_dataloaders(
     df: pd.DataFrame,
     tokenizer,
     config: dict,
+    batch_size: Optional[int] = None,
+    sampling_strategy: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Create dataloaders with pre-computed text tensors."""
-    bs = config["training"]["batch_size"]
+    bs = batch_size or config["training"]["batch_size"]
+    sampling = sampling_strategy or config["training"].get("sampling_strategy", "shuffle")
 
     if "split" in df.columns:
         train_df = df[df["split"] == "train"]
@@ -139,9 +160,20 @@ def create_dataloaders(
     test_ds = _make_dataset(test_df, tokenizer, config, "test")
 
     loader_kwargs = dict(num_workers=0, pin_memory=False)
+    train_sampler = None
+    train_shuffle = True
+    if sampling == "weighted":
+        train_sampler = _build_weighted_sampler(train_df["label"].values)
+        train_shuffle = False
 
     return (
-        DataLoader(train_ds, batch_size=bs, shuffle=True, **loader_kwargs),
+        DataLoader(
+            train_ds,
+            batch_size=bs,
+            shuffle=train_shuffle,
+            sampler=train_sampler,
+            **loader_kwargs,
+        ),
         DataLoader(val_ds, batch_size=bs, shuffle=False, **loader_kwargs),
         DataLoader(test_ds, batch_size=bs, shuffle=False, **loader_kwargs),
     )
@@ -251,7 +283,18 @@ def extract_and_save_features(df: pd.DataFrame, config: dict) -> dict:
     from pathlib import Path
 
     processed_dir = Path(config["data"]["processed_dir"])
-    features_path = processed_dir / "features.pt"
+    max_samples = config["data"].get("max_samples")
+    suffix = ""
+    if max_samples:
+        if "filename_index" in df.columns:
+            import hashlib
+
+            joined = ",".join(map(str, df["filename_index"].tolist()))
+            sample_hash = hashlib.md5(joined.encode("utf-8")).hexdigest()[:8]
+            suffix = f"_max{max_samples}_{sample_hash}"
+        else:
+            suffix = f"_max{max_samples}"
+    features_path = processed_dir / f"features{suffix}.pt"
 
     if features_path.exists():
         logger.info(f"Loading cached features from {features_path}")
@@ -327,10 +370,15 @@ class PreExtractedDataset(Dataset):
 
 
 def create_fast_dataloaders(
-    df: pd.DataFrame, features: dict, config: dict
+    df: pd.DataFrame,
+    features: dict,
+    config: dict,
+    batch_size: Optional[int] = None,
+    sampling_strategy: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Create dataloaders from pre-extracted features. Zero image loading during training."""
-    bs = config["training"]["batch_size"]
+    bs = batch_size or config["training"]["batch_size"]
+    sampling = sampling_strategy or config["training"].get("sampling_strategy", "shuffle")
 
     if "split" not in df.columns:
         raise ValueError("Pre-extracted features require 'split' column in dataframe")
@@ -339,7 +387,7 @@ def create_fast_dataloaders(
     val_mask = (df["split"] == "val").values
     test_mask = (df["split"] == "test").values
 
-    def _make(mask, shuffle):
+    def _make(mask, shuffle, sampler=None):
         ds = PreExtractedDataset(
             url_tensors=features["url_tensors"][mask],
             url_features=features["url_features"][mask],
@@ -348,8 +396,26 @@ def create_fast_dataloaders(
             visual_embeddings=features["visual_embeddings"][mask],
             labels=features["labels"][mask],
         )
-        return DataLoader(ds, batch_size=bs, shuffle=shuffle, num_workers=0, pin_memory=False)
+        return DataLoader(
+            ds,
+            batch_size=bs,
+            shuffle=shuffle,
+            sampler=sampler,
+            num_workers=0,
+            pin_memory=False,
+        )
 
     logger.info(f"Fast splits -> train: {train_mask.sum()} | val: {val_mask.sum()} | test: {test_mask.sum()}")
 
-    return _make(train_mask, True), _make(val_mask, False), _make(test_mask, False)
+    train_sampler = None
+    train_shuffle = True
+    if sampling == "weighted":
+        train_labels = features["labels"][train_mask].cpu().numpy()
+        train_sampler = _build_weighted_sampler(train_labels)
+        train_shuffle = False
+
+    return (
+        _make(train_mask, train_shuffle, train_sampler),
+        _make(val_mask, False),
+        _make(test_mask, False),
+    )

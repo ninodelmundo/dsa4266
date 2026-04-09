@@ -6,4 +6,9 @@ from .fusion_model import (
     URLOnlyClassifier,
     TextOnlyClassifier,
     VisualOnlyClassifier,
+    FastFusionClassifier,
+    FastURLOnlyClassifier,
+    FastTextOnlyClassifier,
+    FastVisualOnlyClassifier,
+    FastHTMLOnlyClassifier,
 )
