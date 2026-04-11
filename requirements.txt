@@ -18,3 +18,4 @@ scipy>=1.11.0
 torchmetrics>=1.0.0
 accelerate>=0.23.0
 python-dotenv>=1.0.0
+optuna>=3.6.0

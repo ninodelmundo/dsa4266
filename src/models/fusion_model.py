@@ -200,6 +200,15 @@ class FastFusionClassifier(nn.Module):
         self.projected_dim = fusion_cfg["projected_dim"]
         self.hidden_dim = fusion_cfg["hidden_dim"]
         self.dropout_p = fusion_cfg["dropout"]
+        self.disabled_modalities = set(fusion_cfg.get("disabled_modalities", []))
+        self.use_url_scalar_features = fusion_cfg.get("use_url_scalar_features", True)
+        self.active_modalities = [
+            name
+            for name in ["url", "text", "visual", "html"]
+            if name not in self.disabled_modalities
+        ]
+        if not self.active_modalities:
+            raise ValueError("FastFusionClassifier requires at least one active modality")
 
         # URL encoder runs live (small, fast on CPU)
         self.url_encoder = build_url_encoder(config)
@@ -207,7 +216,10 @@ class FastFusionClassifier(nn.Module):
         # Per-modality projections from raw feature dimensions
         # url_proj takes BiLSTM output (url.output_dim) + 9 hand-crafted features
         self.url_proj = nn.Sequential(
-            nn.Linear(config["url"]["output_dim"] + URL_FEATURES_DIM, self.projected_dim),
+            nn.Linear(
+                config["url"]["output_dim"] + (URL_FEATURES_DIM if self.use_url_scalar_features else 0),
+                self.projected_dim,
+            ),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
             nn.LayerNorm(self.projected_dim),
@@ -232,13 +244,13 @@ class FastFusionClassifier(nn.Module):
             nn.LayerNorm(self.projected_dim),
         )
 
-        # Fusion-specific parameters (4 modalities: url, text, visual, html)
+        # Fusion-specific parameters
         if self.strategy == "weighted":
-            self.modality_weights = nn.Parameter(torch.ones(4))
+            self.modality_weights = nn.Parameter(torch.ones(len(self.active_modalities)))
         elif self.strategy == "attention":
             self.attention = nn.MultiheadAttention(
                 embed_dim=self.projected_dim,
-                num_heads=4,
+                num_heads=fusion_cfg.get("attention_heads", 4),
                 dropout=self.dropout_p,
                 batch_first=True,
             )
@@ -246,7 +258,7 @@ class FastFusionClassifier(nn.Module):
 
         # Classifier head
         if self.strategy == "concatenation":
-            classifier_in = self.projected_dim * 4
+            classifier_in = self.projected_dim * len(self.active_modalities)
         else:
             classifier_in = self.projected_dim
 
@@ -267,26 +279,33 @@ class FastFusionClassifier(nn.Module):
         mixup_lambda: float = None,
         mixup_index: torch.Tensor = None,
     ) -> torch.Tensor:
-        url_raw = torch.cat([self.url_encoder(url_tokens), url_features], dim=-1)
-        url_emb = self.url_proj(url_raw)
-        text_emb = self.text_proj(text_emb)
-        visual_emb = self.visual_proj(visual_emb)
-        html_emb = self.html_proj(html_features)
+        embeddings = []
+        if "url" not in self.disabled_modalities:
+            url_encoder_out = self.url_encoder(url_tokens)
+            if self.use_url_scalar_features:
+                url_encoder_out = torch.cat([url_encoder_out, url_features], dim=-1)
+            embeddings.append(self.url_proj(url_encoder_out))
+        if "text" not in self.disabled_modalities:
+            embeddings.append(self.text_proj(text_emb))
+        if "visual" not in self.disabled_modalities:
+            embeddings.append(self.visual_proj(visual_emb))
+        if "html" not in self.disabled_modalities:
+            embeddings.append(self.html_proj(html_features))
 
         # Manifold mixup: blend projected embeddings to create synthetic samples
         if mixup_lambda is not None and mixup_index is not None:
-            url_emb = mixup_lambda * url_emb + (1 - mixup_lambda) * url_emb[mixup_index]
-            text_emb = mixup_lambda * text_emb + (1 - mixup_lambda) * text_emb[mixup_index]
-            visual_emb = mixup_lambda * visual_emb + (1 - mixup_lambda) * visual_emb[mixup_index]
-            html_emb = mixup_lambda * html_emb + (1 - mixup_lambda) * html_emb[mixup_index]
+            embeddings = [
+                mixup_lambda * emb + (1 - mixup_lambda) * emb[mixup_index]
+                for emb in embeddings
+            ]
 
         if self.strategy == "concatenation":
-            fused = torch.cat([url_emb, text_emb, visual_emb, html_emb], dim=-1)
+            fused = torch.cat(embeddings, dim=-1)
         elif self.strategy == "weighted":
             w = F.softmax(self.modality_weights, dim=0)
-            fused = w[0] * url_emb + w[1] * text_emb + w[2] * visual_emb + w[3] * html_emb
+            fused = sum(weight * emb for weight, emb in zip(w, embeddings))
         elif self.strategy == "attention":
-            stack = torch.stack([url_emb, text_emb, visual_emb, html_emb], dim=1)
+            stack = torch.stack(embeddings, dim=1)
             attended, _ = self.attention(stack, stack, stack)
             attended = self.attention_norm(attended + stack)
             fused = attended.mean(dim=1)
@@ -298,20 +317,56 @@ class FastFusionClassifier(nn.Module):
             return F.softmax(self.modality_weights.detach(), dim=0).cpu()
         return None
 
+    def get_active_modalities(self):
+        return list(self.active_modalities)
+
+
+class FastURLOnlyClassifier(nn.Module):
+    """URL-only baseline using the fast-pipeline URL features."""
+
+    def __init__(self, config: dict):
+        super().__init__()
+        url_cfg = config["url"]
+        self.use_url_scalar_features = url_cfg.get("use_url_scalar_features", True)
+        self.encoder = build_url_encoder(config)
+        classifier_in = url_cfg["output_dim"] + (
+            URL_FEATURES_DIM if self.use_url_scalar_features else 0
+        )
+        hidden_dim = url_cfg.get("classifier_hidden_dim", 128)
+        bottleneck_dim = url_cfg.get("classifier_bottleneck_dim", 64)
+        dropout = config["fusion"]["dropout"]
+        self.classifier = nn.Sequential(
+            nn.Linear(classifier_in, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, bottleneck_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(bottleneck_dim, 2),
+        )
+
+    def forward(self, url_tokens, url_features=None, **kwargs):
+        features = self.encoder(url_tokens)
+        if self.use_url_scalar_features and url_features is not None:
+            features = torch.cat([features, url_features], dim=-1)
+        return self.classifier(features)
+
 
 class FastTextOnlyClassifier(nn.Module):
     """Text-only baseline using pre-extracted 768-d DistilBERT embeddings."""
 
     def __init__(self, config: dict):
         super().__init__()
+        hidden_dim = config["text"].get("classifier_hidden_dim", 512)
+        bottleneck_dim = config["text"].get("classifier_bottleneck_dim", 128)
         self.classifier = nn.Sequential(
-            nn.Linear(768, 512),
+            nn.Linear(768, hidden_dim),
             nn.ReLU(),
             nn.Dropout(config["text"]["dropout"]),
-            nn.Linear(512, 128),
+            nn.Linear(hidden_dim, bottleneck_dim),
             nn.ReLU(),
             nn.Dropout(config["fusion"]["dropout"]),
-            nn.Linear(128, 2),
+            nn.Linear(bottleneck_dim, 2),
         )
 
     def forward(self, text_emb, **kwargs):
@@ -323,15 +378,39 @@ class FastVisualOnlyClassifier(nn.Module):
 
     def __init__(self, config: dict):
         super().__init__()
+        hidden_dim = config["visual"].get("classifier_hidden_dim", 512)
+        bottleneck_dim = config["visual"].get("classifier_bottleneck_dim", 128)
         self.classifier = nn.Sequential(
-            nn.Linear(1280, 512),
+            nn.Linear(1280, hidden_dim),
             nn.ReLU(),
             nn.Dropout(config["visual"]["dropout"]),
-            nn.Linear(512, 128),
+            nn.Linear(hidden_dim, bottleneck_dim),
             nn.ReLU(),
             nn.Dropout(config["fusion"]["dropout"]),
-            nn.Linear(128, 2),
+            nn.Linear(bottleneck_dim, 2),
         )
 
     def forward(self, visual_emb, **kwargs):
         return self.classifier(visual_emb)
+
+
+class FastHTMLOnlyClassifier(nn.Module):
+    """HTML-structure-only baseline using handcrafted HTML features."""
+
+    def __init__(self, config: dict):
+        super().__init__()
+        hidden_dim = config.get("html", {}).get("classifier_hidden_dim", 128)
+        bottleneck_dim = config.get("html", {}).get("classifier_bottleneck_dim", 64)
+        dropout = config["fusion"]["dropout"]
+        self.classifier = nn.Sequential(
+            nn.Linear(HTML_FEATURES_DIM, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, bottleneck_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(bottleneck_dim, 2),
+        )
+
+    def forward(self, html_features, **kwargs):
+        return self.classifier(html_features)

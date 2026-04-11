@@ -4,6 +4,11 @@ project:
   device: "cuda"  # or "cpu"
   output_dir: "outputs/"
 
+runtime:
+  amp: true
+  autocast_dtype: "float16"
+  prune_trials: true
+
 data:
   raw_dir: "data/raw/"
   processed_dir: "data/processed/"
@@ -21,6 +26,9 @@ url:
   model_type: "lstm"  # options: "cnn", "lstm", "transformer"
   num_layers: 2
   dropout: 0.3
+  classifier_hidden_dim: 128
+  classifier_bottleneck_dim: 64
+  use_url_scalar_features: true
 
 text:
   model_name: "distilbert-base-uncased"
@@ -28,6 +36,8 @@ text:
   output_dim: 256
   dropout: 0.3
   freeze_layers: 6  # freeze all DistilBERT layers, train only projection head
+  classifier_hidden_dim: 512
+  classifier_bottleneck_dim: 128
 
 visual:
   model_name: "efficientnet_b0"  # lighter than resnet50, fits in 3.7GB RAM
@@ -35,6 +45,12 @@ visual:
   output_dim: 256
   dropout: 0.3
   freeze_layers: true  # freeze backbone, train only head
+  classifier_hidden_dim: 512
+  classifier_bottleneck_dim: 128
+
+html:
+  classifier_hidden_dim: 128
+  classifier_bottleneck_dim: 64
 
 fusion:
   strategy: "attention"  # options: "concatenation", "weighted", "attention"
@@ -42,6 +58,9 @@ fusion:
   hidden_dim: 256
   dropout: 0.5
   num_classes: 2
+  attention_heads: 4
+  disabled_modalities: []
+  use_url_scalar_features: true
 
 training:
   batch_size: 16
@@ -52,7 +71,26 @@ training:
   patience: 10  # early stopping
   gradient_clip: 1.0
   class_weights: true  # handle class imbalance
+  sampling_strategy: "shuffle"  # options: "shuffle", "weighted"
+  optimizer: "adamw"  # options: "adamw", "rmsprop"
+  scheduler: "plateau"  # options: "plateau", "cosine", "onecycle", "none"
+  checkpoint_metric: "val_loss"  # options: "val_loss", "composite_score"
+  min_learning_rate: 1e-6
+  onecycle_pct_start: 0.3
+  rmsprop_momentum: 0.0
   decision_threshold: 0.5
+
+augmentation:
+  enabled: true
+  rotation_degrees: 10
+  horizontal_flip_prob: 0.5
+  brightness: 0.2
+  contrast: 0.2
+  saturation: 0.1
+  hue: 0.02
+  translate: [0.05, 0.05]
+  zoom_scale: [0.9, 1.05]
+  random_resized_crop_scale: [0.85, 1.0]
 
 evaluation:
   metrics:
@@ -62,5 +100,88 @@ evaluation:
     - f1
     - roc_auc
     - pr_auc
+    - c_index
+    - composite_score
   ablation: true
   robustness_tests: true
+
+optimization:
+  study_metric: "composite_score"
+  n_trials: 20
+  promote_top_k: 3
+  metric_weights:
+    f1: 0.5
+    roc_auc: 0.25
+    c_index: 0.25
+  search_spaces:
+    common:
+      batch_size: [16, 32, 64]
+      optimizer: ["adamw", "rmsprop"]
+      scheduler: ["plateau", "cosine", "onecycle"]
+      sampling_strategy: ["shuffle", "weighted"]
+      class_weights: [true, false]
+      learning_rate:
+        low: 1.0e-4
+        high: 5.0e-3
+        log: true
+      weight_decay:
+        low: 1.0e-6
+        high: 5.0e-3
+        log: true
+      fusion_dropout:
+        low: 0.2
+        high: 0.6
+    url:
+      model_type: ["cnn", "lstm", "transformer"]
+      embedding_dim: [32, 64, 96]
+      hidden_dim: [64, 128, 256]
+      dropout:
+        low: 0.1
+        high: 0.5
+      classifier_hidden_dim: [64, 128, 256]
+      classifier_bottleneck_dim: [32, 64, 128]
+      use_url_scalar_features: [true, false]
+    text:
+      dropout:
+        low: 0.1
+        high: 0.5
+      classifier_hidden_dim: [256, 512, 768]
+      classifier_bottleneck_dim: [64, 128, 256]
+    visual:
+      dropout:
+        low: 0.1
+        high: 0.5
+      classifier_hidden_dim: [256, 512, 768]
+      classifier_bottleneck_dim: [64, 128, 256]
+    html:
+      classifier_hidden_dim: [64, 128, 256]
+      classifier_bottleneck_dim: [32, 64, 128]
+    fusion:
+      strategy: ["concatenation", "weighted", "attention"]
+      projected_dim: [128, 256, 384]
+      hidden_dim: [256, 512, 768]
+      dropout:
+        low: 0.2
+        high: 0.6
+
+ablation:
+  variants:
+    - name: "full_tuned"
+      disabled_modalities: []
+      use_url_scalar_features: true
+    - name: "no_url"
+      disabled_modalities: ["url"]
+      use_url_scalar_features: true
+    - name: "no_text"
+      disabled_modalities: ["text"]
+      use_url_scalar_features: true
+    - name: "no_visual"
+      disabled_modalities: ["visual"]
+      use_url_scalar_features: true
+    - name: "no_html"
+      disabled_modalities: ["html"]
+      use_url_scalar_features: true
+    - name: "no_url_scalar_features"
+      disabled_modalities: []
+      use_url_scalar_features: false
+  compare_strategies: ["attention", "weighted", "concatenation"]

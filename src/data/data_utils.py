@@ -144,7 +144,11 @@ def extract_html_features(html_content: str) -> torch.Tensor:
 
 # Image Utilities
 
-def get_image_transforms(image_size: int = 224, augment: bool = False):
+def get_image_transforms(
+    image_size: int = 224,
+    augment: bool = False,
+    augment_config: Optional[dict] = None,
+):
     """Return torchvision transforms for screenshot preprocessing."""
     from torchvision import transforms
 
@@ -153,13 +157,31 @@ def get_image_transforms(image_size: int = 224, augment: bool = False):
         std=[0.229, 0.224, 0.225],
     )
 
-    if augment:
+    if augment and (augment_config or {}).get("enabled", True):
+        cfg = augment_config or {}
+        crop_scale = tuple(cfg.get("random_resized_crop_scale", [0.85, 1.0]))
+        translate = tuple(cfg.get("translate", [0.05, 0.05]))
+        zoom_scale = tuple(cfg.get("zoom_scale", [0.9, 1.05]))
         return transforms.Compose(
             [
-                transforms.Resize((image_size + 32, image_size + 32)),
-                transforms.RandomCrop(image_size),
-                transforms.RandomHorizontalFlip(p=0.3),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2),
+                transforms.RandomResizedCrop(
+                    image_size,
+                    scale=crop_scale,
+                ),
+                transforms.RandomAffine(
+                    degrees=float(cfg.get("rotation_degrees", 10)),
+                    translate=translate,
+                    scale=zoom_scale,
+                ),
+                transforms.RandomHorizontalFlip(
+                    p=float(cfg.get("horizontal_flip_prob", 0.5))
+                ),
+                transforms.ColorJitter(
+                    brightness=float(cfg.get("brightness", 0.2)),
+                    contrast=float(cfg.get("contrast", 0.2)),
+                    saturation=float(cfg.get("saturation", 0.1)),
+                    hue=float(cfg.get("hue", 0.02)),
+                ),
                 transforms.ToTensor(),
                 normalize,
             ]
