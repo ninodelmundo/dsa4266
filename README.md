@@ -32,7 +32,6 @@ Typical outputs include model checkpoints, training curves, confusion matrices, 
 From the project root:
 
 ```bash
-cd /Users/ryan/dsa4266
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
@@ -208,5 +207,4 @@ Feature extraction can be slow on the first run because pretrained DistilBERT an
 - Missing Kaggle credentials: create a repo-root `.env` file with `KAGGLE_USERNAME` and `KAGGLE_KEY`.
 - No CUDA device: set `project.device` to `cpu` in `configs/config.yaml`.
 - Slow first training run: this is expected because text and image features are extracted and cached.
-- BeautifulSoup import error in notebooks: install `beautifulsoup4` and import it with `from bs4 import BeautifulSoup`, not `from beautifulsoup4 import BeautifulSoup`.
 - Standalone script confusion: prefer `main.py`, `scripts/optimize_unimodal.py`, `scripts/optimize_fusion.py`, and `scripts/run_ablation.py` for the current workflow.
