@@ -187,6 +187,47 @@ Important artifacts:
 
 The ablation workflow evaluates the full tuned fusion model, variants with individual modalities removed, variants without handcrafted URL scalar features, and alternative fusion strategies.
 
+## Explainability Workflow
+
+Run SHAP-based surrogate explanations, fusion modality Shapley diagnostics, and local URL/text/image explanations with:
+
+```bash
+python3 scripts/run_explainability.py --config configs/config.yaml
+```
+
+For a quick smoke run:
+
+```bash
+python3 scripts/run_explainability.py --config configs/config.yaml --max-samples 8 --background-samples 4 --local-samples 2
+```
+
+Results are saved to:
+
+```text
+outputs/explainability/
+```
+
+Important artifacts:
+
+- `explainability_report.html`: static browser-openable summary report.
+- `dashboard_inputs.csv` and `dashboard_predictions.csv`: interpretable dashboard table and surrogate predictions.
+- `global_importance.csv` and `global_importance.png`: global readable surrogate importance.
+- `fusion_modality_contributions.csv` and `fusion_modality_contributions.png`: URL/text/visual/HTML modality contribution diagnostics.
+- `local/sample_XXX/`: per-sample explanations from the selected split, including `explanation.json`, URL/text HTML reports, Grad-CAM, occlusion maps, and local contribution plots.
+- `shapash_explainer.pkl`: saved Shapash `SmartExplainer` object, produced only when Shapash is installed in the active Python environment.
+
+Shapash is an interactive local web app, not a static HTML file. After generating `shapash_explainer.pkl`, launch it with:
+
+```bash
+python3 scripts/serve_shapash_dashboard.py --explainer outputs/explainability/shapash_explainer.pkl --port 8050
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8050
+```
+
 ## Configuration Tips
 
 Most experiment settings live in `configs/config.yaml`.
@@ -207,4 +248,5 @@ Feature extraction can be slow on the first run because pretrained DistilBERT an
 - Missing Kaggle credentials: create a repo-root `.env` file with `KAGGLE_USERNAME` and `KAGGLE_KEY`.
 - No CUDA device: set `project.device` to `cpu` in `configs/config.yaml`.
 - Slow first training run: this is expected because text and image features are extracted and cached.
+- Shapash missing: install it in the active environment with `python3 -m pip install shapash dash`, then verify with `python3 -c "import shapash; print(shapash.__version__)"`.
 - Standalone script confusion: prefer `main.py`, `scripts/optimize_unimodal.py`, `scripts/optimize_fusion.py`, and `scripts/run_ablation.py` for the current workflow.
