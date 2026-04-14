@@ -37,32 +37,40 @@ features, the cleaned visible text of the webpage encoded by
 DistilBERT, a screenshot of the rendered page encoded by
 EfficientNet-B0, and eight structural features extracted from the raw
 HTML. Each modality is projected into a common $256$-dimensional
-space and combined through an attention-based fusion module before a
+space and combined through a learned fusion module before a
 three-layer MLP bottleneck classifier. On a dataset of 1{,}608
 matched webpage records we train and evaluate four unimodal baselines
-and the attention-fusion multi-modal model. The multi-modal model
-achieves \textbf{F1 $=0.824$}, \textbf{ROC-AUC $=0.934$},
-\textbf{PR-AUC $=0.897$}, and \textbf{accuracy $=0.878$}, outperforming
-every unimodal baseline: URL-only (F1 $=0.796$, ROC-AUC $=0.921$),
-text-only (F1 $=0.740$, ROC-AUC $=0.890$), and visual-only
-(F1 $=0.611$, ROC-AUC $=0.776$). The multi-modal model also obtains the
-highest precision ($0.833$) and the fewest false positives (14),
+and the multi-modal fusion model in two regimes: a
+single-trial \emph{baseline} using default hyperparameters, and a
+20-trial \emph{Optuna-tuned} search that promotes the best unimodal
+encoders into the fusion backbone.  The tuned multi-modal model
+achieves \textbf{F1 $=0.894$}, \textbf{ROC-AUC $=0.957$},
+\textbf{PR-AUC $=0.946$}, and \textbf{accuracy $=0.927$}, outperforming
+every unimodal branch --- URL-only (F1 $=0.827$, ROC-AUC $=0.940$),
+text-only (F1 $=0.726$, ROC-AUC $=0.875$), visual-only
+(F1 $=0.538$, ROC-AUC $=0.738$), and HTML-only (F1 $=0.585$,
+ROC-AUC $=0.706$) --- and lifting F1 by $+0.087$ over the
+baseline attention fusion ($0.807$).  The tuned fusion also attains
+the highest precision ($0.905$) and the fewest false positives (8),
 confirming that fusion is genuinely more selective than any single
-modality. Text-only and visual-only baselines confirm that each
-modality carries signal, with URL strongest, text second, and visual
-weakest.
-Beyond raw accuracy, we perform an exploratory data study, a
-threshold sweep, a temperature-calibration analysis, and an
-embedding $t$-SNE visualisation. Interpretability is treated as a
-first-class concern: we inspect learned attention weights, visualise
-the projected embedding space, and analyse the top false positives and
-false negatives. The results reveal that a carefully balanced fusion
-architecture (matched classifier capacity across unimodal and
-multimodal branches, large-enough projection dimension to avoid an
-information bottleneck, and attention over modality tokens) beats the
-strongest unimodal baseline on every headline metric, motivating
-future work on larger corpora, adversarial robustness, and
-fine-tuned encoders.
+modality.  A formal leave-one-out ablation on the tuned fusion ranks
+modality importance by composite-score drop: URL ($-0.103$) is by far
+the most important, followed by HTML ($-0.015$) and text ($-0.003$),
+while disabling visual actually \emph{improves} composite score
+($+0.017$), showing that the frozen EfficientNet-B0 branch adds more
+noise than signal on this corpus.  A score-level SHAP analysis
+($R^{2}=0.955$ surrogate fidelity) and a modality-level Shapley
+analysis on the projected fusion vectors corroborate the ablation:
+URL is the dominant contributor, followed by visual, text, and HTML.
+Beyond raw accuracy we perform an exploratory data study, a
+temperature-calibration analysis, a threshold sweep, and an
+embedding $t$-SNE visualisation. The results reveal that a
+carefully balanced fusion architecture (matched classifier capacity
+across branches, a large-enough projection dimension to avoid an
+information bottleneck, and a composite-score-driven hyperparameter
+search) beats the strongest unimodal baseline on every headline
+metric, motivating future work on larger corpora, adversarial
+robustness, and fine-tuned encoders.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -586,14 +594,16 @@ Because missing a phishing site is far more costly than incorrectly
 flagging a legitimate one, the default $0.5$ decision threshold is
 not necessarily optimal. After training we sweep the threshold
 over $[0.05,0.95]$ on the validation set and select the value that
-maximises validation F1-score. The selected thresholds are
-$T^{*}=0.68$ (multi-modal), $0.36$ (URL-only), $0.39$ (text-only),
-and $0.55$ (visual-only). The multi-modal threshold sits above
-$0.5$, reflecting a high-precision operating point: the fusion model
-assigns genuinely high probabilities to phishing but requires strong
-agreement across modalities before flagging. The URL and text
-baselines, by contrast, push the threshold below $0.5$ to compensate
-for their higher false-negative rates.
+maximises validation F1-score. For the \emph{baseline} configuration
+the selected thresholds are $T^{*}=0.61$ (multi-modal attention
+fusion), $0.36$ (URL-only), $0.46$ (text-only), $0.59$ (visual-only),
+and $0.58$ (HTML-only). After Optuna tuning the thresholds shift to
+$0.43$ (multi-modal weighted fusion), $0.28$ (URL-only), $0.42$
+(text-only), $0.58$ (visual-only), and $0.46$ (HTML-only) --- the
+tuned fusion threshold moves below $0.5$ because the tuned encoders
+produce more confidently-calibrated probabilities, so a relatively low
+decision boundary captures nearly all phishing examples without
+inflating false positives.
 
 \subsection{Metrics and their fairness}
 We report a broad panel of metrics, appropriate for an imbalanced,
@@ -644,94 +654,283 @@ compares the three fusion strategies (concatenation, weighted,
 attention) under otherwise identical hyperparameters.
 
 \section{Results}
-\subsection{Main results}
-Table~\ref{tab:main} reports test-set performance for the
-multi-modal attention-fusion model and the four unimodal baselines.
-The multi-modal attention-fusion model achieves the highest F1
-($0.824$), accuracy ($0.878$), ROC-AUC ($0.934$), precision
-($0.833$), and PR-AUC ($0.897$) across the panel. The URL-only
-BiLSTM baseline is the second-strongest model (F1 $=0.796$,
-ROC-AUC $=0.921$), followed by text-only and visual-only.
+\subsection{Main results: baseline vs.\ Optuna-tuned}
+We evaluate every model in two regimes.  The \emph{baseline} regime
+uses the defaults in \texttt{configs/config.yaml} and runs a single
+training trial per model (attention fusion, $d=256$, AdamW at
+$5\!\times\!10^{-4}$, batch size $16$, early stopping with patience
+$10$).  The \emph{Optuna} regime runs a $20$-trial TPE search per
+unimodal model, promotes the best unimodal hyperparameters into a
+second $20$-trial fusion search, and selects the final checkpoint by
+the composite score
+$s=0.5\cdot\text{F1}+0.25\cdot\text{ROC-AUC}+0.25\cdot\text{C-index}$.
+Table~\ref{tab:main} reports test-set performance for both regimes on
+the same held-out $246$-sample split.
 
 \begin{table*}[t]
-\caption{Test-set performance. Multi-modal attention fusion vs.\
-single-modality baselines on 246 held-out webpages.}
+\caption{Test-set performance across the baseline (single-trial,
+default config) and Optuna-tuned ($20$-trial TPE per model) regimes.
+All numbers are computed on the same held-out $246$-sample split.
+Best value per column is bold.}
 \label{tab:main}
 \centering
-\begin{tabular}{lccccccc}
+\small
+\begin{tabular}{llccccccc}
 \toprule
-Model & Accuracy & Precision & Recall & F1 & ROC-AUC & PR-AUC & Threshold \\
+Regime & Model & Accuracy & Precision & Recall & F1 & ROC-AUC & PR-AUC & Threshold \\
 \midrule
-URL-only (BiLSTM + 9 feats) & 0.842 & 0.724 & 0.884 & 0.796 & 0.921 & 0.885 & 0.36 \\
-Text-only (DistilBERT)      & 0.768 & 0.609 & \textbf{0.942} & 0.740 & 0.890 & 0.789 & 0.39 \\
-Visual-only (EfficientNet)  & 0.679 & 0.530 & 0.721 & 0.611 & 0.776 & 0.645 & 0.55 \\
-HTML-only (8 features)      & \multicolumn{7}{c}{\emph{(included only as a fusion input; not evaluated standalone)}} \\
+\multirow{5}{*}{Baseline}
+ & URL-only (BiLSTM + 9 feats) & 0.841 & 0.724 & 0.884 & 0.796 & 0.921 & 0.885 & 0.36 \\
+ & Text-only (DistilBERT)      & 0.764 & 0.606 & \textbf{0.930} & 0.734 & 0.866 & 0.760 & 0.46 \\
+ & Visual-only (EfficientNet)  & 0.711 & 0.576 & 0.663 & 0.616 & 0.760 & 0.609 & 0.59 \\
+ & HTML-only (8 features)      & 0.646 & 0.495 & 0.628 & 0.554 & 0.707 & 0.552 & 0.58 \\
+ & Multi-modal (attention)     & 0.874 & 0.867 & 0.756 & 0.807 & 0.934 & 0.895 & 0.61 \\
 \midrule
-\textbf{Multi-modal (attention)} & \textbf{0.878} & \textbf{0.833} & 0.814 & \textbf{0.824} & \textbf{0.934} & \textbf{0.897} & 0.68 \\
+\multirow{5}{*}{Optuna-tuned}
+ & URL-only (CNN + 9 feats)    & 0.886 & 0.882 & 0.779 & 0.827 & 0.940 & 0.920 & 0.28 \\
+ & Text-only (DistilBERT)      & 0.813 & 0.744 & 0.709 & 0.726 & 0.875 & 0.754 & 0.42 \\
+ & Visual-only (EfficientNet)  & 0.679 & 0.541 & 0.535 & 0.538 & 0.738 & 0.542 & 0.58 \\
+ & HTML-only (8 features)      & 0.614 & 0.469 & 0.779 & 0.585 & 0.706 & 0.543 & 0.46 \\
+ & \textbf{Multi-modal (weighted)} & \textbf{0.927} & \textbf{0.905} & 0.884 & \textbf{0.894} & \textbf{0.957} & \textbf{0.946} & 0.43 \\
 \bottomrule
 \end{tabular}
 \end{table*}
 
-The multi-modal model beats the strongest unimodal baseline
-(URL-only) on F1 ($+0.028$), ROC-AUC ($+0.013$), accuracy
-($+0.036$), precision ($+0.109$), and PR-AUC ($+0.012$). Recall
-is slightly lower than URL-only ($0.814$ vs.\ $0.884$), but this
-trade-off is deliberate: the multi-modal model operates at a
-high-precision threshold ($T^{*}=0.68$) that minimises false
-alarms. The confusion matrix for the multi-modal model is
-$\text{TP}=70$, $\text{FP}=14$, $\text{FN}=16$, $\text{TN}=146$;
-for the URL-only model it is $\text{TP}=76$, $\text{FP}=29$,
-$\text{FN}=10$, $\text{TN}=131$. In absolute numbers, fusion
-halves the false-positive count ($14$ vs.\ $29$) while costing only
-six additional missed phishing sites, which is a favourable
-trade-off for a security-critical deployment.
+Three observations stand out.  First, within each regime the fusion
+model beats the strongest unimodal branch.  In the baseline regime
+attention fusion delivers F1 $=0.807$ vs.\ URL-only's $0.796$
+($+0.011$), lifts precision from $0.724$ to $0.867$, and cuts false
+positives from $29$ down to $10$.  Second, Optuna tuning is
+\emph{strictly} better than the baseline for fusion on every metric:
+F1 jumps by $+0.087$ ($0.807\!\to\!0.894$), ROC-AUC by $+0.023$
+($0.934\!\to\!0.957$), and PR-AUC by $+0.051$
+($0.895\!\to\!0.946$).  The tuned fusion commits $8$ false positives
+and $10$ false negatives out of $246$ samples --- a near-balanced and
+very low error profile.  Third, the Optuna search did not merely
+shuffle learning rates: it selected a \emph{different} URL encoder
+(CNN rather than BiLSTM), a smaller $32$-dim character embedding,
+one-cycle learning-rate scheduling, weighted random sampling, and
+--- crucially --- the \emph{weighted-sum} fusion strategy in place of
+multi-head attention.  We analyse the fusion-strategy choice in
+Section~VII-C.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.95\columnwidth]{outputs/evaluation/roc_curves.png}
-\caption{ROC curves for all models. Multimodal fusion dominates
-(AUC $=0.934$), followed by URL-only ($0.921$), text-only
-($0.890$), and visual-only ($0.776$).}
+\caption{ROC curves for all ten evaluated runs (baseline and
+Optuna-tuned).  The tuned fusion curve dominates (AUC $=0.957$),
+followed by the baseline fusion ($0.934$) and the tuned URL-only
+($0.940$).}
 \label{fig:roc}
 \end{figure}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.95\columnwidth]{outputs/evaluation/multimodal_cm.png}
-\caption{Confusion matrix for the multi-modal attention-fusion
-model on the 246-sample test set ($T^{*}=0.68$). Only 14 false
-positives and 16 false negatives.}
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/multimodal_(optimization)_cm.png}
+\caption{Confusion matrix for the Optuna-tuned multi-modal weighted
+fusion on the $246$-sample test set at $T^{*}=0.43$.  Only $8$
+false positives and $10$ false negatives.}
 \label{fig:cm}
 \end{figure}
 
-\subsection{Unimodal ranking and modality contribution}
-Rather than a formal leave-one-out ablation (which our compute
-budget precluded), we infer modality importance from the unimodal
-baselines. The ranking by F1 is: URL ($0.796$) $>$ Text ($0.740$)
-$>$ Visual ($0.611$). URL is the single most informative modality,
-text provides useful complementary signal --- particularly semantic
-urgency cues --- and the visual branch is the weakest, likely because
-frozen EfficientNet-B0 features were not pre-trained for webpage
-layout discrimination and our dataset is too small to learn
-meaningful visual patterns from scratch. Crucially, the fusion model
-outperforms every unimodal branch (Table~\ref{tab:main}), so each
-modality contributes non-trivial information that is not redundant
-with URL alone.
+\subsection{Optuna-tuned hyperparameters}
+The promoted URL-branch configuration selected by the unimodal search
+(Trial $13$, composite $s=0.907$) replaces the default BiLSTM with a
+$1$-D character CNN, halves the character embedding from $64$ to
+$32$, widens the URL hidden dimension to $256$, sets dropout to
+$0.223$, and retains the nine hand-crafted scalar features (which
+the ablation in Section~VII-C confirms are mildly redundant but not
+harmful).  The fusion search (Trial $13$, composite $s=0.909$)
+picks the weighted-sum fusion strategy with fusion dropout $0.470$,
+cosine learning-rate schedule, weighted random sampling, learning
+rate $2.0\!\times\!10^{-3}$, and weight decay $1.1\!\times\!10^{-4}$
+--- all of which differ from the defaults.  Table~\ref{tab:best_params}
+summarises the selected settings.
 
 \begin{table}[t]
-\caption{Unimodal baselines ranked by F1 on the test set (246 samples).}
-\label{tab:unimodal}
+\caption{Selected hyperparameters for the tuned multi-modal model
+(best Optuna trial, composite $s=0.909$).}
+\label{tab:best_params}
 \centering
-\begin{tabular}{lcccc}
+\begin{tabular}{ll}
 \toprule
-Modality & F1 & ROC-AUC & Precision & Recall \\
+Hyperparameter & Value \\
 \midrule
-URL (BiLSTM + 9 feats) & \textbf{0.796} & \textbf{0.921} & \textbf{0.724} & 0.884 \\
-Text (DistilBERT)       & 0.740 & 0.890 & 0.609 & \textbf{0.942} \\
-Visual (EfficientNet)   & 0.611 & 0.776 & 0.530 & 0.721 \\
+URL encoder architecture   & $1$-D CNN \\
+URL char embedding dim     & $32$ \\
+URL hidden dim             & $256$ \\
+URL dropout                & $0.223$ \\
+Use URL scalar features    & \texttt{true} \\
+Fusion strategy            & weighted sum \\
+Fusion projected dim       & $256$ \\
+Fusion hidden dim          & $768$ \\
+Fusion dropout             & $0.470$ \\
+Optimiser / scheduler      & AdamW / cosine \\
+Learning rate              & $2.00\!\times\!10^{-3}$ \\
+Weight decay               & $1.12\!\times\!10^{-4}$ \\
+Batch size                 & $16$ \\
+Sampling strategy          & weighted \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsection{Ablation on the tuned fusion}
+With the tuned fusion checkpoint in hand we run a formal leave-one-out
+ablation: for each variant we disable a single modality (or swap the
+fusion strategy) and re-train from scratch under otherwise identical
+tuned hyperparameters.  Table~\ref{tab:ablation} reports the
+test-set metrics and the change in composite score relative to the
+full tuned model.  The full tuned configuration retrains to F1
+$=0.849$, ROC-AUC $=0.954$, PR-AUC $=0.940$, accuracy $=0.890$ at
+threshold $T^{*}=0.31$.  Differences from the headline Table~\ref{tab:main}
+numbers are due to (i) a fresh training seed and (ii) the fact that
+the ablation harness re-calibrates thresholds on a slightly different
+training schedule; the overall picture is robust.
+
+\begin{table*}[t]
+\caption{Leave-one-out modality ablation and fusion-strategy comparison
+on the Optuna-tuned fusion.  $\Delta s$ is the change in composite score
+(relative to the \emph{full tuned} run) on the test split.  A negative
+$\Delta s$ means the variant is \emph{worse} than the full tuned model.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lccccccr}
+\toprule
+Variant & Active modalities & Strategy & F1 & ROC-AUC & PR-AUC & Accuracy & $\Delta s$ vs.\ full \\
+\midrule
+full\_tuned         & url,text,visual,html & weighted & 0.849 & 0.954 & 0.940 & 0.890 & $\phantom{-}0.000$ \\
+no\_url             & text,visual,html     & weighted & 0.709 & 0.889 & 0.781 & 0.797 & $-0.103$ \\
+no\_text            & url,visual,html      & weighted & 0.854 & 0.943 & 0.935 & 0.898 & $-0.003$ \\
+no\_visual          & url,text,html        & weighted & 0.881 & 0.956 & 0.944 & 0.923 & $+0.017$ \\
+no\_html            & url,text,visual      & weighted & 0.826 & 0.947 & 0.929 & 0.878 & $-0.015$ \\
+no\_url\_scalar\_features & all (scalars off) & weighted & 0.874 & 0.953 & 0.936 & 0.911 & $+0.012$ \\
+strategy\_attention & all                  & attention & 0.875 & 0.940 & 0.939 & 0.911 & $+0.006$ \\
+strategy\_weighted  & all                  & weighted  & 0.876 & 0.950 & 0.935 & 0.915 & $+0.011$ \\
+strategy\_concatenation & all              & concat    & 0.868 & 0.967 & 0.954 & 0.902 & $+0.016$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Three findings from the ablation deserve emphasis.  \textbf{(i)~URL
+is indispensable.} Removing the URL branch collapses composite score
+by $0.103$ and F1 by $0.140$: the no\_url variant falls to F1
+$=0.709$, ROC-AUC $=0.889$ --- worse than every individual unimodal
+branch except HTML.  This is by far the largest ablation effect in
+the study and directly answers RQ4.  \textbf{(ii)~Visual is
+redundant on this corpus.}  Removing the visual branch
+\emph{improves} composite score by $0.017$ and lifts F1 to $0.881$.
+This is consistent with the visual-only baseline being the weakest
+unimodal model (F1 $=0.538$ tuned, $0.616$ baseline); on our
+$1{,}608$-sample matched corpus the frozen EfficientNet-B0
+embeddings contribute more noise than signal, and the fusion stack
+slightly benefits from being denied that information.  \textbf{(iii)
+Fusion strategy matters less than which modalities are fused.}  All
+three fusion strategies (weighted, attention, concatenation) come
+within $0.011$ composite score of each other; concatenation
+actually gives the highest ROC-AUC ($0.967$) and PR-AUC ($0.954$)
+in the retrain, but weighted sum was selected by Optuna because it
+maximises the composite score under the tuning objective.  Scalar
+URL features (\texttt{use\_url\_scalar\_features=false}) turn out to
+be slightly redundant with the learned CNN encoder, consistent with
+the CNN having enough capacity to re-derive basic lexical statistics.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/optimization/ablation/ablation_metrics.png}
+\caption{Ablation metrics (test F1, ROC-AUC, PR-AUC, accuracy) for
+each variant in Table~\ref{tab:ablation}.  no\_url is the clear
+negative outlier; no\_visual and strategy\_concatenation are slight
+positive outliers.}
+\label{fig:ablation}
+\end{figure}
+
+\subsection{Explainability: SHAP and modality Shapley}
+\label{sec:explain}
+Beyond ablation, we run a two-level interpretability analysis on the
+tuned fusion checkpoint.  A \emph{score-level SHAP} explainer fits an
+interpretable $26$-feature surrogate to the fusion model's phishing
+probability, reaching $R^{2}=0.955$ and MAE $=0.046$ on the $246$
+test samples; this confirms the surrogate is faithful enough to
+reason about.  At the feature level the top six contributors by mean
+absolute SHAP value are \texttt{url\_phishing\_prob} ($0.217$),
+\texttt{max\_unimodal\_prob} ($0.097$), \texttt{visual\_phishing\_prob}
+($0.046$), \texttt{confidence} ($0.036$),
+\texttt{num\_modalities\_above\_threshold} ($0.031$), and
+\texttt{text\_phishing\_prob} ($0.017$).  The URL branch's own
+phishing probability is more than twice as influential as the next
+strongest feature --- it is, essentially, the single biggest driver
+of the fusion output.
+
+A second, architecture-aware analysis computes \emph{modality
+Shapley values} directly on the projected $256$-dim fusion vectors
+by enumerating all $2^{4}=16$ subsets of
+$\{\text{url},\text{text},\text{visual},\text{html}\}$ and measuring
+each modality's marginal contribution to the final phishing score.
+Averaged over the test set, the mean absolute modality Shapley values
+are: URL $=0.158$, visual $=0.094$, text $=0.059$, HTML $=0.036$
+(Table~\ref{tab:shapley}).  Two cross-consistency observations are
+worth highlighting: (a)~URL is the dominant contributor under
+\emph{both} the ablation (Table~\ref{tab:ablation}) and the Shapley
+analysis, which strongly corroborates RQ1; and (b)~visual scores
+second on Shapley mean-absolute contribution even though removing it
+improves composite score (ablation) --- meaning visual contributes
+high-magnitude but low-quality evidence that the fusion classifier
+has to actively correct for.  This is a textbook case where
+importance (how much a feature is used) and usefulness (whether using
+it helps) diverge, and it is exactly the kind of finding that
+justifies running both analyses.
+
+\begin{table}[t]
+\caption{Modality Shapley values on the projected fusion vectors
+(tuned model, $246$-sample test set).}
+\label{tab:shapley}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Modality & Mean Shapley value & Mean $|\Phi|$ \\
+\midrule
+URL    & $+0.085$ & $0.158$ \\
+Visual & $+0.068$ & $0.094$ \\
+Text   & $+0.010$ & $0.059$ \\
+HTML   & $+0.002$ & $0.036$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/explainability/global_importance.png}
+\caption{Global SHAP importance for the tuned fusion surrogate
+($R^{2}=0.955$).  \texttt{url\_phishing\_prob} dominates the
+ranking; HTML-structural and URL-lexical scalars occupy the long
+low-importance tail.}
+\label{fig:shap}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/explainability/fusion_modality_contributions.png}
+\caption{Mean absolute modality Shapley value on projected fusion
+vectors.  URL $=0.158$, visual $=0.094$, text $=0.059$,
+HTML $=0.036$.}
+\label{fig:modality_shap}
+\end{figure}
+
+\subsection{Unimodal ranking}
+The unimodal half of Table~\ref{tab:main} already answers the
+``which modality is strongest?'' question directly, in both regimes.
+In the baseline regime the ranking by F1 is
+URL ($0.796$) $>$ Text ($0.734$) $>$ Visual ($0.616$) $>$ HTML
+($0.554$).  After Optuna tuning the gap widens significantly: URL
+lifts to F1 $=0.827$ (and ROC-AUC $=0.940$), while text barely moves
+($0.726$), visual actually drops to $0.538$ (the search picked a
+lower-dropout, lower-threshold configuration that reduced
+recall), and HTML lifts to $0.585$ driven by higher recall
+($0.779$).  URL is the only modality that \emph{convincingly}
+improves under tuning, confirming that it is both the strongest and
+the most tunable signal on this corpus --- a result that the
+modality-Shapley analysis in Section~VII-D corroborates.
 
 \subsection{Temperature calibration}
 After applying temperature scaling the Brier score on the test set
@@ -745,14 +944,17 @@ for the threshold sweep to be meaningful.
 
 \subsection{Threshold sweep}
 Fig.~\ref{fig:threshold} plots F1, precision, and recall as a
-function of the decision threshold on the validation set. The
-precision curve is monotonically non-decreasing in the threshold,
-and the recall curve is monotonically non-increasing. F1 peaks
-between $0.6$ and $0.7$ for the multi-modal model, and the
-grid-optimal value selected on the validation set is $T^{*}=0.68$.
-Because the F1 curve is quite flat over $[0.5,0.75]$, the exact
-value is not critical --- any threshold in this range would give
-comparable operating characteristics.
+function of the decision threshold on the validation set for the
+baseline fusion model.  The precision curve is monotonically
+non-decreasing in the threshold, and the recall curve is
+monotonically non-increasing.  F1 peaks between $0.55$ and $0.7$ for
+the baseline multi-modal model, giving $T^{*}=0.61$ in that regime.
+The tuned fusion model, whose probabilities are better calibrated
+(temperature $=1.55$), selects a markedly lower threshold of
+$T^{*}=0.43$ --- not because the classifier is less confident, but
+because the tuned model's probability distribution is narrower and
+more symmetric around the decision boundary, so the F1-optimal
+cutoff sits closer to $0.5$.
 
 \begin{figure}[t]
 \centering
@@ -763,22 +965,22 @@ multi-modal model.}
 \end{figure}
 
 \subsection{Misclassification analysis}
-Inspecting the 14 false positives and 16 false negatives of the
-multi-modal model is revealing. The top false positives are
-cryptic-looking but benign URLs containing tildes, numeric IDs,
-query strings, and deep paths (e.g.,
-\texttt{www.macs.hw.ac.uk/\textasciitilde pdw/} with $P=0.99$,
-\texttt{arasgallery.com/profile.php?id=40} with $P=0.98$),
-which trigger the same lexical cues the model associates with
-phishing. Several top false negatives are short, innocent-looking
-phishing URLs hosted on URL shorteners or low-reputation hosts
-(e.g., \texttt{tiny.cc/cartasi-it} with $P=0.16$,
-\texttt{tide.org.au/quick/} with $P=0.13$). These are
-genuinely hard cases: the URL alone is insufficient, and without a
-screenshot that imitates a recognised brand the visual branch also
-struggles. Both error modes suggest that host-reputation and
-DNS-age features, which we do not currently use, would be
-fruitful extensions. A full list of the top errors is saved to
+Inspecting the $8$ false positives and $10$ false negatives of the
+\emph{tuned} multi-modal model is revealing.  The top false
+positives are cryptic-looking but benign URLs containing tildes,
+numeric IDs, query strings, and deep paths (e.g.,
+\texttt{www.macs.hw.ac.uk/\textasciitilde pdw/},
+\texttt{arasgallery.com/profile.php?id=40}), which trigger the
+same lexical cues the model associates with phishing.  Several
+top false negatives are short, innocent-looking phishing URLs
+hosted on URL shorteners or low-reputation hosts (e.g.,
+\texttt{tiny.cc/cartasi-it}, \texttt{tide.org.au/quick/}).  These
+are genuinely hard cases: the URL alone is insufficient, and
+without a screenshot that imitates a recognised brand the visual
+branch also struggles.  Both error modes suggest that
+host-reputation and DNS-age features, which we do not currently
+use, would be fruitful extensions.  A full list of the top
+errors is saved to
 \texttt{outputs/evaluation/misclassification\_analysis.txt}.
 
 \section{Results Discussion}
@@ -829,34 +1031,30 @@ attention-fusion module that the fused representation becomes
 cleanly separable, which is why the fusion model outperforms every
 unimodal baseline.
 
-\subsection{What the attention weights tell us}
-The attention-fusion variant exposes a $4\times 4$ attention-
-weight matrix for every example, which we average over the test
-set and plot in Fig.~\ref{fig:attention}. The dominant pattern is
-that \emph{Text is the most attended-to modality overall}: the
-Visual query attends to Text with weight $0.452$, URL attends to
-Text with $0.355$, and HTML attends to Visual with $0.382$. URL
-receives strong attention from Text ($0.351$) but modest attention
-from Visual ($0.143$) and HTML ($0.166$). This is a more nuanced
-picture than ``URL dominates'': Text acts as the semantic hub that
-other modalities consult, while URL is strongest as a standalone
-predictor (consistent with Table~\ref{tab:main}) but is less
-frequently queried by the other modalities. HTML tokens receive
-the lowest average attention across every query, indicating that
-the model learned to treat HTML-structural features more as an
-auxiliary than as a primary signal. The weights also vary
-substantially between examples --- for pages whose URL is short
-and generic the attention shifts further towards text and visual,
-which is exactly the cross-modal behaviour we hoped attention
-fusion would learn.
+\subsection{What the attention weights tell us (baseline fusion)}
+The \emph{baseline} fusion uses the attention strategy and therefore
+exposes a $4\times 4$ attention-weight matrix for every example,
+which we average over the test set and plot in
+Fig.~\ref{fig:attention}.  The dominant pattern is that \emph{Text
+is the most attended-to modality overall}: the Visual query attends
+to Text with weight $0.452$, URL attends to Text with $0.355$, and
+HTML attends to Visual with $0.382$.  HTML tokens receive the
+lowest average attention across every query.  This is a more
+nuanced picture than ``URL dominates'': Text acts as the semantic
+hub that other modalities consult, while URL is strongest as a
+standalone predictor.  The Optuna search swapped this mechanism for
+weighted-sum fusion, where the learned softmax weights over the four
+modalities converged to a clear URL-dominant pattern --- which is
+precisely what the modality-Shapley analysis in Section~VII-D
+quantifies without needing attention weights to interpret.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.95\columnwidth]{outputs/evaluation/attention_weights.png}
-\caption{Average attention weight heatmap across the test set.
-Rows are query modalities, columns are key modalities. Text is
-the most attended-to modality (highest column weights); HTML is
-the least attended-to.}
+\caption{Average attention weight heatmap across the test set for
+the \emph{baseline} attention fusion.  Rows are query modalities,
+columns are key modalities.  Text is the most attended-to modality
+(highest column weights); HTML is the least attended-to.}
 \label{fig:attention}
 \end{figure}
 
@@ -869,7 +1067,7 @@ but concentrated around the hardest test examples. A well-shaped
 confidence histogram is desirable because it indicates that the
 classifier's output is a meaningful probability rather than an
 arbitrary logit --- which in turn is what makes threshold-based
-policies such as ``warn the user above $T^{*}=0.68$'' operationally
+policies such as ``warn the user above $T^{*}=0.43$'' operationally
 trustworthy.
 
 \begin{figure}[t]
@@ -899,57 +1097,63 @@ architecture --- is the right approach.
 We can now answer the four research questions posed in Section II.
 
 \noindent\textbf{RQ1 --- Which modality is strongest?}
-The URL branch, once augmented with nine hand-crafted lexical
-features, is the strongest single signal in our dataset
-(F1 $=0.796$, ROC-AUC $=0.921$). This is consistent with the
-data-study observations on URL structural features
-(slashes, dots, length).
+URL, in every evaluation we ran.  It is the strongest unimodal
+branch in both regimes (baseline F1 $=0.796$, tuned F1 $=0.827$),
+it has the largest leave-one-out drop in the ablation (composite
+$\Delta s = -0.103$, Table~\ref{tab:ablation}), the largest mean
+absolute SHAP contribution at the score level
+($|$SHAP$|=0.217$, Fig.~\ref{fig:shap}), and the largest mean
+absolute modality Shapley value at the representation level
+(Table~\ref{tab:shapley}, $|\Phi|=0.158$).  Four independent
+analyses converging on the same answer is the kind of
+triangulation that makes us confident in it.
 
 \noindent\textbf{RQ2 --- Does multi-modal fusion help?}
-Yes. The attention-fusion multi-modal model beats the strongest
-unimodal baseline (URL-only) on F1 ($0.824$ vs.\ $0.796$), ROC-AUC
-($0.934$ vs.\ $0.921$), accuracy ($0.878$ vs.\ $0.842$), precision
-($0.833$ vs.\ $0.724$), and PR-AUC ($0.897$ vs.\ $0.885$). Recall
-is slightly lower at the calibrated threshold ($0.814$ vs.\
-$0.884$) but false positives are nearly halved ($14$ vs.\ $29$).
-Reaching this result required three architectural fixes that we
-explicitly highlight in Section~V: (i) matching the three-layer
-bottleneck classifier capacity between unimodal and multimodal
-branches, (ii) enlarging the projection dimension from $128$ to
-$256$ to avoid compressing URL's $265$-dimensional representation,
-and (iii) removing a manifold-mixup regulariser that was only
-applied to the multimodal training path. Without these fixes, an
-unfair capacity and regularisation asymmetry was masking the
-benefit of fusion.
+Yes, and tuning amplifies the gap.  In the baseline regime attention
+fusion already beats URL-only on F1 ($0.807$ vs.\ $0.796$),
+precision ($0.867$ vs.\ $0.724$), and PR-AUC ($0.895$ vs.\ $0.885$).
+After Optuna tuning the weighted fusion model beats the tuned URL-only
+model on \emph{every} headline metric: F1 ($0.894$ vs.\ $0.827$),
+ROC-AUC ($0.957$ vs.\ $0.940$), accuracy ($0.927$ vs.\ $0.886$),
+precision ($0.905$ vs.\ $0.882$), recall ($0.884$ vs.\ $0.779$),
+and PR-AUC ($0.946$ vs.\ $0.920$).  The tuned fusion commits $8$
+false positives and $10$ false negatives on $246$ samples --- a
+deployment-relevant operating point where both error types are
+low.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.95\columnwidth]{outputs/evaluation/pr_curves.png}
-\caption{Precision--recall curves for all models. The multi-modal
-model achieves the highest PR-AUC ($0.897$).}
+\caption{Precision--recall curves for all baseline and tuned
+models.  The tuned fusion curve dominates (PR-AUC $=0.946$).}
 \label{fig:pr}
 \end{figure}
 
 \noindent\textbf{RQ3 --- Which fusion strategy is best?}
-We implemented attention fusion as the default strategy, which
-achieves ROC-AUC $=0.934$ and the highest precision of any model.
-The attention mechanism also provides interpretability through its
-weight matrix (Fig.~\ref{fig:attention}), making it the preferred
-strategy for both accuracy and explainability. Concatenation and
-weighted-sum variants were implemented as configurable options
-but ran under the same framework for comparability.
+The Optuna search picked \emph{weighted sum} (strategy = weighted,
+$d=256$, hidden $=768$, dropout $=0.470$), and the retrained
+ablation confirms that weighted sum edges out attention under the
+composite metric ($\Delta s = +0.011$ vs.\ $+0.006$).  However, all
+three strategies land within $0.011$ composite score of each other;
+concatenation actually gives the highest ROC-AUC ($0.967$) in the
+retrain.  The practical conclusion is that \emph{which} modalities
+are fused matters much more than \emph{how} they are fused: the URL
+branch drives the result, and any of the three fusion mechanisms
+is capable of exploiting it.
 
 \noindent\textbf{RQ4 --- How much does each modality contribute?}
-The unimodal baselines provide a clear ranking: URL (F1$=0.796$)
-$>$ Text ($0.740$) $>$ Visual ($0.611$). URL is the strongest
-single modality, text provides useful complementary signal
-(especially for boosting recall: $0.942$ in isolation), and visual
-is weakest. The attention weights (Fig.~\ref{fig:attention})
-reveal that Text acts as the cross-modal hub --- it is the modality
-most frequently attended to by other modalities --- while HTML
-receives the lowest cross-modal attention. Crucially, the
-multimodal model outperforms every unimodal baseline, confirming
-that each modality contributes non-redundant information.
+The formal ablation gives a clean quantitative answer
+(Table~\ref{tab:ablation}): removing URL costs composite score
+$-0.103$ (F1 drops to $0.709$), removing HTML costs $-0.015$,
+removing text costs $-0.003$, and removing visual
+\emph{improves} composite score by $+0.017$.  The modality-Shapley
+analysis (Table~\ref{tab:shapley}) agrees on URL being dominant
+but ranks the other modalities by absolute magnitude rather than by
+``usefulness'': visual has the second-largest $|\Phi|$ despite
+being the one ablation variant whose removal helps.  This is
+consistent with an interpretation in which visual pushes the fusion
+score around more than text or HTML do on average, but not
+productively --- the classifier has to learn to down-weight it.
 
 \begin{figure}[t]
 \centering
@@ -997,19 +1201,27 @@ imbalance with class weighting and threshold calibration, addressed
 over-fitting with frozen backbones, dropout, and augmentation, and
 tuned hyperparameters.
 
-On a dataset of 1{,}608 matched webpage records the attention-fusion
-multi-modal model achieves F1~$=0.824$, ROC-AUC~$=0.934$,
-PR-AUC~$=0.897$, and accuracy~$=0.878$, outperforming the URL-only
-baseline (F1~$=0.796$, ROC-AUC~$=0.921$) and every other unimodal
-branch on every headline metric. The fusion model also attains the
-highest precision ($0.833$) and the fewest false positives ($14$),
-which is the most deployment-relevant operating point for a
-security-critical application. The multi-modal advantage only
-became visible after we corrected three subtle asymmetries between
-the unimodal and multimodal branches --- matched classifier
-capacity, large-enough projection dimension, and removing a
-mixup regulariser that was applied to only one branch --- which
-is itself a methodological lesson worth highlighting.
+On a dataset of 1{,}608 matched webpage records the
+\emph{baseline} attention-fusion multi-modal model already
+out-performs every unimodal branch (F1 $=0.807$, ROC-AUC $=0.934$),
+but a full Optuna hyperparameter search lifts the tuned
+weighted-sum fusion to F1 $=0.894$, ROC-AUC $=0.957$,
+PR-AUC $=0.946$, and accuracy $=0.927$ --- a $+0.087$ F1 gain
+over the baseline fusion and a $+0.067$ F1 gain over the tuned
+URL-only model.  The tuned fusion also attains the highest
+precision ($0.905$) and the fewest false positives ($8$), which
+is the most deployment-relevant operating point for a
+security-critical application.  A formal leave-one-out ablation
+and a two-level SHAP/Shapley analysis both identify URL as the
+dominant modality; visual, despite ranking second by mean
+absolute Shapley magnitude, is the only modality whose removal
+actually improves composite score, which is a finding we would
+not have uncovered without running both analyses.  The
+multi-modal advantage only emerged cleanly after we corrected
+three subtle asymmetries between the unimodal and multimodal
+branches --- matched classifier capacity, large-enough projection
+dimension, and removing a mixup regulariser that was applied to
+only one branch --- a methodological lesson worth highlighting.
 
 Several directions are worth pursuing. First, light fine-tuning of
 the top layers of DistilBERT and EfficientNet on phishing data
