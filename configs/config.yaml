@@ -54,9 +54,9 @@ html:
 
 fusion:
   strategy: "attention"  # options: "concatenation", "weighted", "attention"
-  projected_dim: 128
+  projected_dim: 256
   hidden_dim: 256
-  dropout: 0.5
+  dropout: 0.3
   num_classes: 2
   attention_heads: 4
   disabled_modalities: []

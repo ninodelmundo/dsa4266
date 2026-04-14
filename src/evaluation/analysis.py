@@ -258,7 +258,7 @@ def plot_embedding_tsne(features: dict, output_dir: str, perplexity: int = 30):
     # Concatenate text + visual as a proxy for the fused representation
     combined = np.concatenate([text_emb, visual_emb], axis=1)
 
-    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, n_iter=1000)
+    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, max_iter=1000)
     coords = tsne.fit_transform(combined)
 
     fig, ax = plt.subplots(figsize=(8, 7))
