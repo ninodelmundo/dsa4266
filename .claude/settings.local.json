@@ -3,7 +3,9 @@
     "allow": [
       "Bash(./venv/Scripts/python.exe main.py --unimodal --config configs/config.yaml)",
       "Bash(ls -lt c:/Users/ninod/dsa4266/outputs/evaluation/*.png)",
-      "Bash(python -c ':*)"
+      "Bash(python -c ':*)",
+      "Bash(python scripts/evaluate.py --sources baseline optimization)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\)\")"
     ]
   }
 }

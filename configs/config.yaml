@@ -185,3 +185,21 @@ ablation:
       disabled_modalities: []
       use_url_scalar_features: false
   compare_strategies: ["attention", "weighted", "concatenation"]
+
+explainability:
+  output_dir: "outputs/explainability/"
+  split: "test"
+  max_samples: null  # set to integer to limit number of samples for global explainability analysis
+  background_samples: 50
+  local_samples: 20 # set to integer to limit number of samples for sample explainability analysis - for dashboard
+  seed: 42
+  methods:
+    shap: true
+    gradcam: true
+    occlusion: true
+    projected_vector_diagnostic: true
+  checkpoints:
+    fusion: null
+  shapash:
+    enabled: true
+    port: 8050

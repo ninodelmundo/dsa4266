@@ -19,3 +19,7 @@ torchmetrics>=1.0.0
 accelerate>=0.23.0
 python-dotenv>=1.0.0
 optuna>=3.6.0
+shap>=0.44.0
+lime>=0.2.0.1
+shapash>=2.4.0
+dash>=2.14.0
