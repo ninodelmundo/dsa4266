@@ -33,7 +33,10 @@ From the project root:
 
 ```bash
 python3 -m venv .venv
+# For MacOS
 source .venv/bin/activate
+# For Windows
+.venv/Scripts/activate
 python3 -m pip install -r requirements.txt
 ```
 
@@ -81,6 +84,7 @@ This creates:
 
 ```text
 data/processed/merged_dataset.csv
+*Note: Only after completing this step should you run EDA.ipynb.
 ```
 
 ### 3. Train The Multimodal Model
