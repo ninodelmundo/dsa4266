@@ -285,6 +285,7 @@ def _fusion_checkpoint_candidates(config: dict) -> List[Tuple[dict, Optional[str
     if best_record.get("checkpoint_path"):
         candidate_paths.append((Path(best_record["checkpoint_path"]), "fusion_optimization_best"))
 
+<<<<<<< HEAD
     baseline_fusion_summary = _read_json(output_dir / "baseline" / "fusion" / "summary.json")
     baseline_fusion_record = baseline_fusion_summary.get("best_record", {})
     if baseline_fusion_record.get("checkpoint_path"):
@@ -293,6 +294,8 @@ def _fusion_checkpoint_candidates(config: dict) -> List[Tuple[dict, Optional[str
         )
 
     candidate_paths.append((output_dir / "baseline" / "fusion" / "best_model.pt", "baseline_fusion_legacy_path"))
+=======
+>>>>>>> origin/main
     candidate_paths.append((output_dir / "multimodal" / "best_model.pt", "baseline_multimodal"))
 
     candidates = []
@@ -336,6 +339,7 @@ def load_fusion_model(config: dict, device, logger) -> LoadedModel:
     return LoadedModel(model, model_type, model_config, None)
 
 
+<<<<<<< HEAD
 def _load_modality_summary(output_dir: Path, modality: str) -> Dict:
     """Prefer the Optuna-tuned unimodal summary; fall back to the standardised baseline."""
     optuna_aggregate = _read_json(output_dir / "optimization" / "unimodal" / "summary.json")
@@ -355,6 +359,14 @@ def load_unimodal_models(config: dict, device, logger) -> Dict[str, LoadedModel]
     loaded = {}
     for modality in MODALITIES:
         modality_summary = _load_modality_summary(output_dir, modality)
+=======
+def load_unimodal_models(config: dict, device, logger) -> Dict[str, LoadedModel]:
+    output_dir = Path(config["project"]["output_dir"])
+    summary = _read_json(output_dir / "optimization" / "unimodal" / "summary.json")
+    loaded = {}
+    for modality in MODALITIES:
+        modality_summary = summary.get(modality, {})
+>>>>>>> origin/main
         params = modality_summary.get("best_params", {})
         record = modality_summary.get("best_record", {})
         checkpoint_path = record.get("checkpoint_path")
