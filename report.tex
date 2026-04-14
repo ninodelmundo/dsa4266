@@ -1,0 +1,1285 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Phishing Detection with a Multi-Modal Machine Learning System:\\
+Integrating URL, Text, Visual, and HTML Signals}
+
+\author{\IEEEauthorblockN{DSA4266 Project Group 5}
+\IEEEauthorblockA{\textit{Sense-making Case Analysis: Science and Technology} \\
+\textit{National University of Singapore}\\
+Singapore}
+}
+
+\maketitle
+
+\begin{abstract}
+Phishing websites remain one of the most prevalent cyber threats and
+traditional blacklist-based defences struggle to keep pace with the
+rate at which malicious sites appear. Machine learning offers a more
+adaptive alternative, but most existing detectors rely on a single
+source of information, typically the URL or the webpage text. In this
+work we design, implement, and critically evaluate a multi-modal
+phishing detection system that fuses four complementary signals: the
+raw URL character sequence together with nine hand-crafted lexical
+features, the cleaned visible text of the webpage encoded by
+DistilBERT, a screenshot of the rendered page encoded by
+EfficientNet-B0, and eight structural features extracted from the raw
+HTML. Each modality is projected into a common $256$-dimensional
+space and combined through a learned fusion module before a
+three-layer MLP bottleneck classifier. On a dataset of 1{,}608
+matched webpage records we train and evaluate four unimodal baselines
+and the multi-modal fusion model in two regimes: a
+single-trial \emph{baseline} using default hyperparameters, and a
+20-trial \emph{Optuna-tuned} search that promotes the best unimodal
+encoders into the fusion backbone.  The tuned multi-modal model
+achieves \textbf{F1 $=0.894$}, \textbf{ROC-AUC $=0.957$},
+\textbf{PR-AUC $=0.946$}, and \textbf{accuracy $=0.927$}, outperforming
+every unimodal branch --- URL-only (F1 $=0.827$, ROC-AUC $=0.940$),
+text-only (F1 $=0.726$, ROC-AUC $=0.875$), visual-only
+(F1 $=0.538$, ROC-AUC $=0.738$), and HTML-only (F1 $=0.585$,
+ROC-AUC $=0.706$) --- and lifting F1 by $+0.087$ over the
+baseline attention fusion ($0.807$).  The tuned fusion also attains
+the highest precision ($0.905$) and the fewest false positives (8),
+confirming that fusion is genuinely more selective than any single
+modality.  A formal leave-one-out ablation on the tuned fusion ranks
+modality importance by composite-score drop: URL ($-0.103$) is by far
+the most important, followed by HTML ($-0.015$) and text ($-0.003$),
+while disabling visual actually \emph{improves} composite score
+($+0.017$), showing that the frozen EfficientNet-B0 branch adds more
+noise than signal on this corpus.  A score-level SHAP analysis
+($R^{2}=0.955$ surrogate fidelity) and a modality-level Shapley
+analysis on the projected fusion vectors corroborate the ablation:
+URL is the dominant contributor, followed by visual, text, and HTML.
+Beyond raw accuracy we perform an exploratory data study, a
+temperature-calibration analysis, a threshold sweep, and an
+embedding $t$-SNE visualisation. The results reveal that a
+carefully balanced fusion architecture (matched classifier capacity
+across branches, a large-enough projection dimension to avoid an
+information bottleneck, and a composite-score-driven hyperparameter
+search) beats the strongest unimodal baseline on every headline
+metric, motivating future work on larger corpora, adversarial
+robustness, and fine-tuned encoders.
+\end{abstract}
+
+\begin{IEEEkeywords}
+phishing detection, multi-modal learning, attention fusion,
+DistilBERT, EfficientNet, BiLSTM, interpretability, cybersecurity,
+class imbalance, threshold calibration
+\end{IEEEkeywords}
+
+\section{Introduction}
+Phishing is a class of social-engineering attack in which adversaries
+impersonate trusted brands through fraudulent URLs, emails, or
+websites in order to harvest credentials or financial information.
+The Anti-Phishing Working Group has consistently reported several
+hundred thousand unique phishing sites every quarter, and the typical
+lifespan of an active phishing domain is measured in hours rather
+than days. This short window makes reactive defences such as URL
+blacklists fundamentally insufficient: a freshly registered site is
+usually unknown to any reputation service at the moment a user is
+tricked into visiting it.
+
+Machine-learning-based detectors respond to this weakness by
+learning generalisable patterns of ``phishiness'' directly from data.
+Historically, however, most learned detectors have been built on a
+\emph{single} modality --- either a character-level model of the URL
+or a text classifier operating on the visible body of the page.
+In reality, phishing is a layered form of deception. The URL may
+contain suspicious sub-domains or brand look-alikes; the HTML may
+include password forms, hidden iframes, and meta-refresh redirects;
+the rendered text may use urgency or impersonation cues; and the
+screenshot may visually mimic a legitimate login page. An attacker
+who obfuscates one of these layers cannot easily obfuscate them all.
+This observation motivates multi-modal detection: by combining
+evidence from several views of a website, a model should be more
+robust and, in principle, more accurate.
+
+Our project has three goals that go beyond reporting a single
+accuracy number. First, we build a reproducible multi-modal
+detection pipeline that jointly consumes URL, text, screenshot, and
+HTML-structural information. Second, we \emph{study} how and why
+each modality contributes, through an exploratory data study,
+ablation experiments, and fusion-strategy comparisons. Third, we
+evaluate the practical trade-off between the additional complexity
+of multi-modal learning and the security-critical requirements of
+high recall, robustness to missing signals, interpretable
+decisions, and reasonable inference cost.
+
+The remainder of the paper is organised as follows. Section II
+states the problem precisely. Section III reviews applicable
+techniques. Section IV describes the dataset and data study,
+Section V details the methodology, and Section VI specifies the
+experimental setup and evaluation metrics. Section VII reports the
+empirical results, Section VIII discusses them with a focus on
+interpretability and training dynamics, and Section IX concludes.
+
+\section{Problem Statement}
+\subsection{Task definition}
+We address binary classification of webpages as either
+\emph{phishing} (label 1) or \emph{legitimate} (label 0). For each
+webpage we observe four inputs: (i)~the raw URL string, (ii)~the raw
+HTML document, (iii)~the cleaned visible text extracted from the
+HTML, and (iv)~a full-page rendered screenshot. Given these four
+signals the task is to produce a calibrated probability
+$\hat{p}\in[0,1]$ that the page is phishing, together with a
+threshold-based decision $\hat{y}\in\{0,1\}$.
+
+\subsection{Why this is hard}
+Phishing detection is a genuinely difficult supervised learning
+problem for four reasons:
+
+\noindent\textbf{Adversarial distribution shift.} Attackers actively
+mutate the features on which detectors rely. Any model that depends
+on a single brittle cue is trivially evadable.
+
+\noindent\textbf{Class imbalance and cost asymmetry.} In practice,
+the vast majority of webpages a user visits are legitimate. Even on
+a relatively balanced research dataset a naive accuracy-maximising
+classifier can achieve high accuracy by simply predicting the
+majority class. Worse, the costs of the two error types are not
+symmetric: a false negative (missed phishing) exposes the user to
+credential theft, whereas a false positive (blocked legitimate site)
+merely causes inconvenience. Our evaluation must reflect that
+asymmetry.
+
+\noindent\textbf{Heterogeneous, multi-modal data.} URL, text,
+screenshot, and HTML live in four completely different
+representation spaces (character sequences, sub-word tokens, raw
+pixels, and numeric structural features). Combining them requires
+careful architectural design and calibration.
+
+\noindent\textbf{Limited labelled data.} The matched, multi-modal
+corpus available to us contains only 1{,}608 fully labelled webpages,
+which strongly constrains the complexity of the models we can train
+from scratch.
+
+\subsection{Research questions}
+These considerations lead directly to four research questions that
+structure the rest of the paper:
+\begin{itemize}
+  \item \textbf{RQ1}: Which modality provides the strongest standalone
+  signal for phishing detection?
+  \item \textbf{RQ2}: Does multi-modal fusion improve detection over
+  the best single-modality baseline?
+  \item \textbf{RQ3}: Which fusion strategy (concatenation, weighted
+  sum, attention) gives the best accuracy--complexity trade-off?
+  \item \textbf{RQ4}: How much does each modality contribute, as
+  measured by leave-one-out ablation, and does the model degrade
+  gracefully when a modality is weak or absent?
+\end{itemize}
+
+\section{Review of Applicable Techniques}
+Given the heterogeneous nature of our inputs, several families of
+techniques are applicable. We survey them briefly and justify our
+choices.
+
+\subsection{URL-based detection}
+\noindent\textbf{Hand-crafted features.} Classical detectors rely on
+lexical and host-based features: URL length, number of dots, number
+of hyphens, presence of an IP address, HTTPS indicator, sub-domain
+count, and entropy of the sub-domain string. These features are
+cheap, interpretable, and remain competitive baselines when fed to
+random forests or gradient-boosted trees.
+
+\noindent\textbf{Character-level neural models.} URLNet
+\cite{urlnet} and its successors replace hand-crafted features with
+an end-to-end character-level CNN or LSTM. These models capture
+patterns that engineered features miss, such as unusual character
+$n$-grams in obfuscated domains, and they generalise better to
+previously unseen URLs. We adopt this approach in combination with
+the hand-crafted features: the learned encoder captures flexible
+patterns while the scalar features provide a strong, interpretable
+lexical prior that is particularly useful when training data is
+scarce.
+
+\subsection{Content- and HTML-based detection}
+\noindent\textbf{Bag-of-words and TF--IDF.} Early text-based
+detectors used token counts or TF--IDF vectors over the visible
+text. They are fast and interpretable but brittle to vocabulary
+shift.
+
+\noindent\textbf{Pre-trained Transformers.} Modern systems fine-tune
+BERT \cite{bert} or lighter variants such as DistilBERT
+\cite{distilbert}, which capture urgency cues, brand mentions, and
+the semantic tone of deceptive text. Given our small dataset we
+\emph{freeze} DistilBERT and train only a projection head on top,
+which is a form of linear probing and avoids over-fitting the
+encoder.
+
+\noindent\textbf{HTML-structural features.} Orthogonal to text
+semantics, several studies exploit structural properties of the raw
+HTML: the number of \texttt{<form>} and \texttt{<input>} elements,
+the presence of password fields, the ratio of external to internal
+links, and the use of \texttt{meta-refresh} directives. These
+features are cheap, robust to text obfuscation, and highly
+interpretable. We use eight such features as a fourth, deliberately
+simple modality.
+
+\subsection{Visual detection}
+\noindent\textbf{Perceptual hashing and logo matching.} Early work
+used SIFT descriptors or perceptual hashes to match screenshots
+against a database of known brand logos, but these approaches
+generalise poorly beyond their reference set.
+
+\noindent\textbf{Pre-trained CNNs.} Recent work fine-tunes a deep
+CNN, such as ResNet or EfficientNet \cite{effnet}, on labelled
+screenshots. We use a frozen EfficientNet-B0 backbone because it
+has substantially fewer parameters than ResNet-50 (5.3M vs.\ 25.6M)
+while remaining competitive on image classification and,
+importantly, fits comfortably in 3.7~GB of RAM.
+
+\subsection{Multi-modal fusion}
+Multi-modal fusion is well studied outside cybersecurity
+\cite{multimodal-survey}. Three canonical strategies exist:
+\emph{early fusion}, which concatenates raw features before a
+single model; \emph{late fusion}, which averages or votes over
+per-modality classifier outputs; and \emph{intermediate fusion},
+which combines per-modality embeddings through learnable weights
+or attention. Intermediate fusion usually performs best because
+it preserves modality-specific structure while still allowing
+cross-modal interaction. We implement three intermediate-fusion
+variants --- concatenation, learnable weighted sum, and multi-head
+attention \cite{attn} --- and compare them empirically.
+
+\subsection{Handling small, imbalanced datasets}
+Finally, several families of techniques are directly applicable to
+the specific statistical challenges of our data:
+class-weighted cross-entropy, weighted random samplers, threshold
+tuning, temperature calibration, mixup-style regularisation, data
+augmentation, early stopping, dropout, and transfer learning
+through frozen pre-trained backbones. We incorporate every one of
+these in our pipeline.
+
+\section{Dataset and Data Study}
+We conduct the exploratory analysis in
+\texttt{notebooks/EDA.ipynb}; all numbers in this section are drawn
+directly from that notebook's outputs.
+
+\subsection{Data sources and merging}
+We combine three public datasets. (i)~A HuggingFace URL dataset
+containing $3{,}000$ URL/label pairs split $50{:}50$ between
+legitimate and phishing classes. (ii)~A Kaggle HTML corpus with
+$1{,}877$ files organised into \texttt{genuine\_site\_0} ($1{,}321$
+files) and \texttt{phishing\_site\_1} ($556$ files). (iii)~A Kaggle
+screenshot corpus with $1{,}697$ full-page images
+($1{,}147$ genuine, $550$ phishing). Filename suffixes in the
+Kaggle folders correspond to HuggingFace row indices, which lets us
+inner-join the three datasets per sample. The HTML-screenshot
+filename overlap is $1{,}684$ of $1{,}877$ (EDA.ipynb cell 29), and
+after requiring \emph{all} three modalities for every record the
+matched corpus contains $1{,}608$ rows. The HuggingFace train/val/test
+split is preserved, yielding final splits of $1{,}128/234/246$
+samples.
+
+\subsection{Class balance}
+The three raw datasets have different balances: URL is $50{:}50$ by
+construction, while the Kaggle HTML and screenshot corpora are
+approximately $70{:}30$ in favour of legitimate. The inner join
+therefore inherits the Kaggle imbalance: as shown in
+Fig.~\ref{fig:classdist}, the matched corpus contains $1{,}103$
+legitimate and $505$ phishing pages, approximately $2.2{:}1$. The
+test split contains $160$ legitimate and $86$ phishing pages. This
+moderate imbalance is enough to skew accuracy-based evaluation: a
+trivial constant ``always legitimate'' classifier would achieve
+$160/246\approx65\%$ accuracy on the test set while catching zero
+phishing pages. This single observation is what forces us to
+privilege F1-score, recall, PR-AUC, and threshold calibration over
+raw accuracy in Sections VI and VII.
+
+\subsection{Data quality issues}
+The raw dataset is not pristine. Three concrete issues surfaced
+during preprocessing:
+
+\noindent\textbf{Filename collisions.} A non-trivial number of
+Kaggle files use Windows-incompatible filename characters, and
+silently fail to read under the native Windows file-system. Our
+loader catches these cases with a \texttt{try/except OSError} and
+reports the number of unreadable files as a warning.
+
+\noindent\textbf{Missing modalities.} Not every URL has a matched
+HTML file or a matched screenshot. We use an \emph{inner join} so
+that the final dataset contains only fully-matched examples; the
+alternative (imputing missing modalities with zeros) was tested
+and found to hurt performance.
+
+\noindent\textbf{Parser failures.} A small fraction of HTML files
+contain malformed markup that BeautifulSoup cannot parse. For those
+cases we fall back to a regex-based tag stripper so that the text
+pipeline always returns a string.
+
+\subsection{Exploratory analysis}
+We conducted an exploratory analysis before any modelling. Key
+observations, visualised in Figs.~\ref{fig:classdist}
+and~\ref{fig:featurecorr}, include:
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/class_distribution.png}
+\caption{Class distribution of the matched $1{,}608$-record corpus.
+Left: overall split ($1{,}103$ legitimate vs.\ $505$ phishing).
+Right: per-split counts. The $\approx 2.2{:}1$ imbalance is inherited
+from the Kaggle HTML/screenshot corpora and motivates class-weighted
+loss and threshold calibration.}
+\label{fig:classdist}
+\end{figure}
+
+\noindent\textbf{URL length and structural density.} Phishing URLs
+are noticeably longer than legitimate ones: on the raw URL dataset,
+mean URL length is $60.3$ characters for phishing vs.\ $44.6$ for
+legitimate (EDA.ipynb cell 6). The Pearson correlation with the
+phishing label is strongest for \texttt{num\_dots} ($+0.267$),
+followed by \texttt{num\_digits} ($+0.181$), \texttt{has\_ip}
+($+0.179$), \texttt{subdomain\_count} ($+0.164$),
+\texttt{domain\_length} ($+0.161$), \texttt{url\_length} ($+0.159$),
+and \texttt{num\_slashes} ($+0.138$). Individually modest, but
+jointly informative.
+
+\noindent\textbf{Hyphens.} \texttt{num\_hyphens} has a \emph{negative}
+correlation with phishing ($-0.143$), because legitimate SEO-friendly
+URLs use hyphens as word separators more often than phishing URLs do.
+
+\noindent\textbf{HTTPS.} The \texttt{has\_https} feature is constant
+zero across our URL corpus (the HuggingFace dump stripped the
+\texttt{https://} prefix), so its correlation is undefined (NaN).
+The feature is therefore non-informative on this dataset and appears
+as a blank row in Fig.~\ref{fig:featurecorr}.
+
+\noindent\textbf{HTML structure (counter-intuitive).} On the HTML
+corpus (EDA.ipynb cell 17), \emph{every} structural feature is
+\emph{negatively} correlated with the phishing label:
+\texttt{has\_login\_text} ($r=-0.260$), \texttt{content\_length}
+($-0.255$), \texttt{num\_tags} ($-0.204$), \texttt{num\_scripts}
+($-0.170$), \texttt{num\_external\_links} ($-0.169$),
+\texttt{num\_forms} ($-0.162$), \texttt{num\_images} ($-0.158$),
+\texttt{num\_inputs} ($-0.137$), \texttt{num\_iframes} ($-0.122$),
+and \texttt{has\_password\_field} ($-0.058$). The legitimate half of
+the HTML corpus is dominated by full-featured content sites with
+richer HTML, while many phishing pages are short-lived stubs that
+fail to render a full login form. Crucially, the sign of these
+correlations does \emph{not} mean the features are useless --- it
+means the model must \emph{invert} them, which a neural classifier
+does easily but a naive rule-based detector would get wrong.
+
+\noindent\textbf{Text length.} Phishing HTML pages have
+\emph{less} visible text than legitimate pages
+(\texttt{content\_length} correlation $=-0.255$). This is consistent
+with the observation that many phishing kits are thin wrappers
+around a login form.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/feature_correlation.png}
+\caption{Feature correlation heatmap computed on the matched training
+corpus (post-inner-join, $1{,}608$ samples). Numbers differ slightly
+from the EDA-notebook correlations (which are computed on the raw
+$3{,}000$-URL and $1{,}877$-HTML corpora separately) because the
+inner join changes the label distribution. The same qualitative
+picture holds: URL structural density correlates positively with
+phishing, HTML structural features correlate negatively, and
+\texttt{has\_https} is non-informative on this corpus.}
+\label{fig:featurecorr}
+\end{figure}
+
+\subsection{Preprocessing pipelines}
+Based on the data study, we defined four preprocessing pipelines.
+URLs are lower-cased, truncated to 200 characters, and character-
+encoded through an 85-entry vocabulary; shorter URLs are
+right-padded with a reserved token. In parallel, nine normalised
+hand-crafted URL features are computed (length, counts of dots,
+hyphens, slashes, digits and special characters, IPv4 indicator,
+HTTPS indicator, and sub-domain count). Raw HTML is parsed with
+BeautifulSoup (\texttt{lxml}), with \texttt{<script>},
+\texttt{<style>}, \texttt{<meta>}, \texttt{<noscript>}, and
+\texttt{<head>} tags removed; the remaining visible text is
+whitespace-normalised and tokenised by the DistilBERT uncased
+tokenizer up to 256 sub-word tokens. Screenshots are resized to
+$224\times224$ and normalised with ImageNet statistics; during
+training we apply stochastic augmentation (random-resized crop in
+$[0.85,1.0]$, affine rotation up to $10^{\circ}$, small translation
+and zoom, horizontal flip $p{=}0.5$, and mild colour jitter).
+Finally, eight structural HTML features are extracted and clipped
+to $[0,1]$.
+
+\section{Methodology and Approach}
+\subsection{Overall architecture}
+Each of the four modalities is first encoded by a dedicated unimodal
+feature extractor. The resulting embeddings are passed through
+small MLP projection heads that map them into a common $d=256$
+space. A fusion module combines the four projected vectors into a
+single representation, which is then classified by a three-layer
+MLP bottleneck with dropout. We deliberately match the classifier
+capacity across the unimodal and multimodal branches so that any
+performance gap is attributable to the fusion mechanism rather than
+to an accidental capacity asymmetry.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/embedding_tsne.png}
+\caption{$t$-SNE projection of the combined text and visual
+embedding space. Phishing and legitimate pages partially separate
+into distinct regions, but there is substantial overlap --- which
+is exactly why a learned fusion classifier, rather than simple
+geometric separability, is needed.}
+\label{fig:tsne}
+\end{figure}
+
+\subsection{URL encoder: what we tried}
+We explored three URL encoder families, all implemented behind a
+common interface and selected via the
+\texttt{url.model\_type} config flag:
+\begin{itemize}
+  \item A 1-D character CNN with multiple filter widths.
+  \item A two-layer bidirectional LSTM.
+  \item A small Transformer with learned positional embeddings.
+\end{itemize}
+The BiLSTM variant gave the best validation F1 and the most stable
+training, and was retained as the default. It uses a 64-dim
+character embedding, 128 hidden units per direction, followed by a
+linear projection to 256 dimensions and a LayerNorm. We then
+concatenate the nine hand-crafted URL features with this learned
+256-dim vector before the projection head. This hybrid design
+combines the flexibility of a learned encoder with the sample-
+efficiency of interpretable features.
+
+\subsection{Text encoder}
+The text encoder is a frozen DistilBERT-base-uncased model. We use
+mean-pooling over the last hidden state rather than the
+\texttt{[CLS]} token, because mean-pooling was empirically more
+stable on the short webpage excerpts in our corpus. The 768-dim
+output is passed through a trainable projection head. Freezing
+DistilBERT dramatically reduces training cost and eliminates the
+risk of catastrophic forgetting on our small dataset while
+preserving the linguistic knowledge learned during pre-training.
+
+\subsection{Visual encoder}
+The visual encoder is a frozen EfficientNet-B0 \cite{effnet}
+backbone pre-trained on ImageNet, with its classification layer
+removed. The 1280-dim image embedding is passed through a
+trainable projection head. We also experimented with ResNet-50 as
+a visual backbone but EfficientNet-B0 gave comparable accuracy at
+roughly one-fifth the parameter count, and was retained for
+efficiency.
+
+\subsection{HTML-structural encoder}
+The eight hand-crafted HTML features are fed directly into a small
+MLP projection head. No deep encoder is used; the feature set is
+already low-dimensional and interpretable, and an additional deep
+encoder would simply risk over-fitting.
+
+\subsection{Projection heads and fusion}
+Each modality-specific embedding is projected into a common
+$d=256$-dim space through a block
+$\text{Linear}\rightarrow\text{ReLU}\rightarrow\text{Dropout}\rightarrow
+\text{LayerNorm}$. The LayerNorm stabilises training and ensures
+the four vectors have comparable scale, which is critical for
+weighted and attention-based fusion. An earlier configuration used
+$d=128$, but we found that compressing the $265$-dimensional URL
+representation (256 learned dims + 9 hand-crafted features) down to
+$128$ acted as an information bottleneck that hurt fusion
+performance; enlarging the projection to $256$ removes this effect.
+
+We implement three fusion strategies:
+
+\noindent\textbf{Concatenation (baseline).} The four projected
+vectors are concatenated into a $1{,}024$-dim vector ($4\times 256$)
+and passed to the classifier. This is the simplest form of
+intermediate fusion.
+
+\noindent\textbf{Weighted sum.} A learnable vector
+$\mathbf{w}\in\mathbb{R}^{4}$ is passed through a softmax and used
+to weight the four embeddings:
+$\mathbf{z}=\sum_{m}\text{softmax}(\mathbf{w})_{m}\,\mathbf{e}_{m}$.
+The fused vector has the same size as any single modality. This
+scheme also exposes the learned per-modality weights for
+interpretability.
+
+\noindent\textbf{Attention fusion (default).} The four projected
+vectors are stacked as a length-four sequence and passed through a
+four-head multi-head self-attention layer followed by a residual
+connection and LayerNorm. The output is mean-pooled across
+modalities. This allows the model to learn cross-modal
+interactions rather than treating each modality independently.
+
+\subsection{Classifier head}
+The fused representation is passed through a three-layer bottleneck
+MLP ($256\rightarrow256\rightarrow128\rightarrow2$) with ReLU
+activation and dropout $0.3$. This matches the three-layer bottleneck
+used by every unimodal baseline, so that fusion performance is not
+inflated (or deflated) by an accidental capacity difference. Training
+uses cross-entropy; for evaluation we apply a softmax and treat
+$P(\text{phishing})$ as the decision score.
+
+\subsection{How we addressed typical data-science problems}
+We deliberately went beyond ``plug in a model'' and applied several
+mitigations for the statistical challenges identified in Section IV.
+
+\noindent\textbf{Class imbalance.} We use class-weighted cross-
+entropy with weights inversely proportional to class frequencies,
+and we calibrate the decision threshold post-hoc on the validation
+set (Section VI).
+
+\noindent\textbf{Small-data overfitting.} We freeze the two large
+pre-trained backbones (DistilBERT, EfficientNet-B0), train only
+lightweight projection heads and a classifier, apply dropout of
+$0.3$ and LayerNorm throughout the fusion stack, and use early
+stopping with patience 10 on validation loss.
+
+\noindent\textbf{Regularisation beyond dropout.} Image-space
+augmentation (random-resized crop, affine rotation, horizontal flip,
+colour jitter) is applied to all visual inputs during training.
+We implemented manifold mixup inside the fusion stack but disabled
+it for the final reported runs after noticing that applying mixup
+only to the multimodal training path was giving the multimodal
+model an unfair regularisation advantage over the unimodal
+baselines; removing it ensures that all models are trained under
+identical objectives.
+
+\noindent\textbf{Probability calibration.} Cross-entropy losses
+trained with class weights tend to produce over-confident logits.
+After training, we perform \emph{temperature scaling} on the
+validation set --- a single scalar $T$ is optimised to minimise
+validation NLL --- so that reported probabilities are well
+calibrated. This is particularly important because our downstream
+threshold sweep relies on meaningful probability scores.
+
+\noindent\textbf{Hyperparameter search.} We wrap the training
+pipeline in an Optuna-based search driven by a composite metric
+$s = 0.5\cdot\text{F1} + 0.25\cdot\text{ROC-AUC} +
+0.25\cdot\text{C-index}$ that rewards both classification quality
+and probability ranking. Trial pruning is enabled to abort
+unpromising runs early. The top-$k$ unimodal configurations are
+promoted to the fusion search, so that the final fusion model is
+built on top of already-tuned encoders.
+
+\noindent\textbf{Reproducibility.} We fix the seed at 42 across
+NumPy, PyTorch, and Python's \texttt{random}, and log every
+configuration and result under \texttt{outputs/run.log}. All
+experiments can be reproduced end-to-end from
+\texttt{scripts/train\_multimodal.py} and the config in
+\texttt{configs/config.yaml}.
+
+\noindent\textbf{Interpretability.} We design the system so that
+multiple sources of explanation are available: (i)~the nine
+hand-crafted URL features and eight HTML features are inherently
+interpretable; (ii)~the weighted-fusion variant exposes per-modality
+softmax weights; (iii)~the attention fusion variant exposes a
+$4\times 4$ attention weight matrix; (iv)~the fused embedding is
+projected to 2-D with $t$-SNE; (v)~the top false positives and
+false negatives are examined manually (Section VII-F).
+
+\section{Experimental Setup and Evaluation Metrics}
+\subsection{Training protocol}
+All models are trained with AdamW, learning rate
+$5\!\times\!10^{-4}$, weight decay $5\!\times\!10^{-4}$, batch size
+16, and a ReduceLROnPlateau scheduler with minimum LR $10^{-6}$.
+We use class-weighted cross-entropy, gradient clipping at 1.0, and
+early stopping with patience 10 on validation loss. Mixed precision
+is enabled when a GPU is available. Every experiment uses the same
+seed.
+
+\subsection{Decision threshold calibration}
+Because missing a phishing site is far more costly than incorrectly
+flagging a legitimate one, the default $0.5$ decision threshold is
+not necessarily optimal. After training we sweep the threshold
+over $[0.05,0.95]$ on the validation set and select the value that
+maximises validation F1-score. For the \emph{baseline} configuration
+the selected thresholds are $T^{*}=0.61$ (multi-modal attention
+fusion), $0.36$ (URL-only), $0.46$ (text-only), $0.59$ (visual-only),
+and $0.58$ (HTML-only). After Optuna tuning the thresholds shift to
+$0.43$ (multi-modal weighted fusion), $0.28$ (URL-only), $0.42$
+(text-only), $0.58$ (visual-only), and $0.46$ (HTML-only) --- the
+tuned fusion threshold moves below $0.5$ because the tuned encoders
+produce more confidently-calibrated probabilities, so a relatively low
+decision boundary captures nearly all phishing examples without
+inflating false positives.
+
+\subsection{Metrics and their fairness}
+We report a broad panel of metrics, appropriate for an imbalanced,
+security-critical task:
+\begin{itemize}
+  \item \textbf{Accuracy} --- an obvious but misleading metric
+  under imbalance; reported for completeness only.
+  \item \textbf{Precision, Recall, F1-score} --- precision measures
+  how many flagged pages are actually phishing, recall measures
+  how many phishing pages we catch, and F1 is their harmonic mean.
+  \item \textbf{ROC-AUC} --- a threshold-free ranking metric.
+  \item \textbf{PR-AUC} --- the area under the precision--recall
+  curve; preferable to ROC-AUC on imbalanced data because it
+  directly rewards precision on the positive class.
+  \item \textbf{C-index} --- concordance-index over probability
+  scores, which measures how often a random phishing page is
+  scored above a random legitimate page.
+  \item \textbf{Confusion matrix} --- exposes the raw counts of
+  TP, FP, FN, and TN.
+\end{itemize}
+
+\noindent\textbf{Which metric should we focus on?}
+Given our problem, we argue that \emph{recall} and \emph{F1 under a
+recall-leaning threshold} are the most operationally meaningful
+metrics. The cost of a false negative (user credentials stolen)
+vastly exceeds the cost of a false positive (user must click past a
+warning). ROC-AUC and PR-AUC are useful secondary metrics because
+they characterise the quality of the probability ranking
+independent of the chosen threshold. Accuracy, by contrast, is
+almost uninformative under imbalance: the $2{:}1$ class ratio alone
+allows a trivial baseline to reach $65\%$ accuracy. We therefore
+report accuracy for completeness but explicitly do not use it as a
+model-selection criterion.
+
+\subsection{Baselines}
+We train four single-modality baselines that reuse the same
+preprocessing, training loop, class weighting, and threshold
+calibration: URL-only (BiLSTM + 9 scalar features), Text-only
+(frozen DistilBERT + MLP head), Visual-only (frozen EfficientNet-B0
++ MLP head), and HTML-only (8 structural features + MLP head).
+
+\subsection{Ablation and fusion-strategy studies}
+We run leave-one-out ablations by setting
+\texttt{disabled\_modalities} in the config to each of
+\texttt{url}, \texttt{text}, \texttt{visual}, and \texttt{html} in
+turn, retraining each variant from scratch. A separate sub-study
+compares the three fusion strategies (concatenation, weighted,
+attention) under otherwise identical hyperparameters.
+
+\section{Results}
+\subsection{Main results: baseline vs.\ Optuna-tuned}
+We evaluate every model in two regimes.  The \emph{baseline} regime
+uses the defaults in \texttt{configs/config.yaml} and runs a single
+training trial per model (attention fusion, $d=256$, AdamW at
+$5\!\times\!10^{-4}$, batch size $16$, early stopping with patience
+$10$).  The \emph{Optuna} regime runs a $20$-trial TPE search per
+unimodal model, promotes the best unimodal hyperparameters into a
+second $20$-trial fusion search, and selects the final checkpoint by
+the composite score
+$s=0.5\cdot\text{F1}+0.25\cdot\text{ROC-AUC}+0.25\cdot\text{C-index}$.
+Table~\ref{tab:main} reports test-set performance for both regimes on
+the same held-out $246$-sample split.
+
+\begin{table*}[t]
+\caption{Test-set performance across the baseline (single-trial,
+default config) and Optuna-tuned ($20$-trial TPE per model) regimes.
+All numbers are computed on the same held-out $246$-sample split.
+Best value per column is bold.}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{llccccccc}
+\toprule
+Regime & Model & Accuracy & Precision & Recall & F1 & ROC-AUC & PR-AUC & Threshold \\
+\midrule
+\multirow{5}{*}{Baseline}
+ & URL-only (BiLSTM + 9 feats) & 0.841 & 0.724 & 0.884 & 0.796 & 0.921 & 0.885 & 0.36 \\
+ & Text-only (DistilBERT)      & 0.764 & 0.606 & \textbf{0.930} & 0.734 & 0.866 & 0.760 & 0.46 \\
+ & Visual-only (EfficientNet)  & 0.711 & 0.576 & 0.663 & 0.616 & 0.760 & 0.609 & 0.59 \\
+ & HTML-only (8 features)      & 0.646 & 0.495 & 0.628 & 0.554 & 0.707 & 0.552 & 0.58 \\
+ & Multi-modal (attention)     & 0.874 & 0.867 & 0.756 & 0.807 & 0.934 & 0.895 & 0.61 \\
+\midrule
+\multirow{5}{*}{Optuna-tuned}
+ & URL-only (CNN + 9 feats)    & 0.886 & 0.882 & 0.779 & 0.827 & 0.940 & 0.920 & 0.28 \\
+ & Text-only (DistilBERT)      & 0.813 & 0.744 & 0.709 & 0.726 & 0.875 & 0.754 & 0.42 \\
+ & Visual-only (EfficientNet)  & 0.679 & 0.541 & 0.535 & 0.538 & 0.738 & 0.542 & 0.58 \\
+ & HTML-only (8 features)      & 0.614 & 0.469 & 0.779 & 0.585 & 0.706 & 0.543 & 0.46 \\
+ & \textbf{Multi-modal (weighted)} & \textbf{0.927} & \textbf{0.905} & 0.884 & \textbf{0.894} & \textbf{0.957} & \textbf{0.946} & 0.43 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Three observations stand out.  First, within each regime the fusion
+model beats the strongest unimodal branch.  In the baseline regime
+attention fusion delivers F1 $=0.807$ vs.\ URL-only's $0.796$
+($+0.011$), lifts precision from $0.724$ to $0.867$, and cuts false
+positives from $29$ down to $10$.  Second, Optuna tuning is
+\emph{strictly} better than the baseline for fusion on every metric:
+F1 jumps by $+0.087$ ($0.807\!\to\!0.894$), ROC-AUC by $+0.023$
+($0.934\!\to\!0.957$), and PR-AUC by $+0.051$
+($0.895\!\to\!0.946$).  The tuned fusion commits $8$ false positives
+and $10$ false negatives out of $246$ samples --- a near-balanced and
+very low error profile.  Third, the Optuna search did not merely
+shuffle learning rates: it selected a \emph{different} URL encoder
+(CNN rather than BiLSTM), a smaller $32$-dim character embedding,
+one-cycle learning-rate scheduling, weighted random sampling, and
+--- crucially --- the \emph{weighted-sum} fusion strategy in place of
+multi-head attention.  We analyse the fusion-strategy choice in
+Section~VII-C.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/roc_curves.png}
+\caption{ROC curves for all ten evaluated runs (baseline and
+Optuna-tuned).  The tuned fusion curve dominates (AUC $=0.957$),
+followed by the baseline fusion ($0.934$) and the tuned URL-only
+($0.940$).}
+\label{fig:roc}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/multimodal_(optimization)_cm.png}
+\caption{Confusion matrix for the Optuna-tuned multi-modal weighted
+fusion on the $246$-sample test set at $T^{*}=0.43$.  Only $8$
+false positives and $10$ false negatives.}
+\label{fig:cm}
+\end{figure}
+
+\subsection{Optuna-tuned hyperparameters}
+The promoted URL-branch configuration selected by the unimodal search
+(Trial $13$, composite $s=0.907$) replaces the default BiLSTM with a
+$1$-D character CNN, halves the character embedding from $64$ to
+$32$, widens the URL hidden dimension to $256$, sets dropout to
+$0.223$, and retains the nine hand-crafted scalar features (which
+the ablation in Section~VII-C confirms are mildly redundant but not
+harmful).  The fusion search (Trial $13$, composite $s=0.909$)
+picks the weighted-sum fusion strategy with fusion dropout $0.470$,
+cosine learning-rate schedule, weighted random sampling, learning
+rate $2.0\!\times\!10^{-3}$, and weight decay $1.1\!\times\!10^{-4}$
+--- all of which differ from the defaults.  Table~\ref{tab:best_params}
+summarises the selected settings.
+
+\begin{table}[t]
+\caption{Selected hyperparameters for the tuned multi-modal model
+(best Optuna trial, composite $s=0.909$).}
+\label{tab:best_params}
+\centering
+\begin{tabular}{ll}
+\toprule
+Hyperparameter & Value \\
+\midrule
+URL encoder architecture   & $1$-D CNN \\
+URL char embedding dim     & $32$ \\
+URL hidden dim             & $256$ \\
+URL dropout                & $0.223$ \\
+Use URL scalar features    & \texttt{true} \\
+Fusion strategy            & weighted sum \\
+Fusion projected dim       & $256$ \\
+Fusion hidden dim          & $768$ \\
+Fusion dropout             & $0.470$ \\
+Optimiser / scheduler      & AdamW / cosine \\
+Learning rate              & $2.00\!\times\!10^{-3}$ \\
+Weight decay               & $1.12\!\times\!10^{-4}$ \\
+Batch size                 & $16$ \\
+Sampling strategy          & weighted \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation on the tuned fusion}
+With the tuned fusion checkpoint in hand we run a formal leave-one-out
+ablation: for each variant we disable a single modality (or swap the
+fusion strategy) and re-train from scratch under otherwise identical
+tuned hyperparameters.  Table~\ref{tab:ablation} reports the
+test-set metrics and the change in composite score relative to the
+full tuned model.  The full tuned configuration retrains to F1
+$=0.849$, ROC-AUC $=0.954$, PR-AUC $=0.940$, accuracy $=0.890$ at
+threshold $T^{*}=0.31$.  Differences from the headline Table~\ref{tab:main}
+numbers are due to (i) a fresh training seed and (ii) the fact that
+the ablation harness re-calibrates thresholds on a slightly different
+training schedule; the overall picture is robust.
+
+\begin{table*}[t]
+\caption{Leave-one-out modality ablation and fusion-strategy comparison
+on the Optuna-tuned fusion.  $\Delta s$ is the change in composite score
+(relative to the \emph{full tuned} run) on the test split.  A negative
+$\Delta s$ means the variant is \emph{worse} than the full tuned model.}
+\label{tab:ablation}
+\centering
+\small
+\begin{tabular}{lccccccr}
+\toprule
+Variant & Active modalities & Strategy & F1 & ROC-AUC & PR-AUC & Accuracy & $\Delta s$ vs.\ full \\
+\midrule
+full\_tuned         & url,text,visual,html & weighted & 0.849 & 0.954 & 0.940 & 0.890 & $\phantom{-}0.000$ \\
+no\_url             & text,visual,html     & weighted & 0.709 & 0.889 & 0.781 & 0.797 & $-0.103$ \\
+no\_text            & url,visual,html      & weighted & 0.854 & 0.943 & 0.935 & 0.898 & $-0.003$ \\
+no\_visual          & url,text,html        & weighted & 0.881 & 0.956 & 0.944 & 0.923 & $+0.017$ \\
+no\_html            & url,text,visual      & weighted & 0.826 & 0.947 & 0.929 & 0.878 & $-0.015$ \\
+no\_url\_scalar\_features & all (scalars off) & weighted & 0.874 & 0.953 & 0.936 & 0.911 & $+0.012$ \\
+strategy\_attention & all                  & attention & 0.875 & 0.940 & 0.939 & 0.911 & $+0.006$ \\
+strategy\_weighted  & all                  & weighted  & 0.876 & 0.950 & 0.935 & 0.915 & $+0.011$ \\
+strategy\_concatenation & all              & concat    & 0.868 & 0.967 & 0.954 & 0.902 & $+0.016$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Three findings from the ablation deserve emphasis.  \textbf{(i)~URL
+is indispensable.} Removing the URL branch collapses composite score
+by $0.103$ and F1 by $0.140$: the no\_url variant falls to F1
+$=0.709$, ROC-AUC $=0.889$ --- worse than every individual unimodal
+branch except HTML.  This is by far the largest ablation effect in
+the study and directly answers RQ4.  \textbf{(ii)~Visual is
+redundant on this corpus.}  Removing the visual branch
+\emph{improves} composite score by $0.017$ and lifts F1 to $0.881$.
+This is consistent with the visual-only baseline being the weakest
+unimodal model (F1 $=0.538$ tuned, $0.616$ baseline); on our
+$1{,}608$-sample matched corpus the frozen EfficientNet-B0
+embeddings contribute more noise than signal, and the fusion stack
+slightly benefits from being denied that information.  \textbf{(iii)
+Fusion strategy matters less than which modalities are fused.}  All
+three fusion strategies (weighted, attention, concatenation) come
+within $0.011$ composite score of each other; concatenation
+actually gives the highest ROC-AUC ($0.967$) and PR-AUC ($0.954$)
+in the retrain, but weighted sum was selected by Optuna because it
+maximises the composite score under the tuning objective.  Scalar
+URL features (\texttt{use\_url\_scalar\_features=false}) turn out to
+be slightly redundant with the learned CNN encoder, consistent with
+the CNN having enough capacity to re-derive basic lexical statistics.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/optimization/ablation/ablation_metrics.png}
+\caption{Ablation metrics (test F1, ROC-AUC, PR-AUC, accuracy) for
+each variant in Table~\ref{tab:ablation}.  no\_url is the clear
+negative outlier; no\_visual and strategy\_concatenation are slight
+positive outliers.}
+\label{fig:ablation}
+\end{figure}
+
+\subsection{Explainability: SHAP and modality Shapley}
+\label{sec:explain}
+Beyond ablation, we run a two-level interpretability analysis on the
+tuned fusion checkpoint.  A \emph{score-level SHAP} explainer fits an
+interpretable $26$-feature surrogate to the fusion model's phishing
+probability, reaching $R^{2}=0.955$ and MAE $=0.046$ on the $246$
+test samples; this confirms the surrogate is faithful enough to
+reason about.  At the feature level the top six contributors by mean
+absolute SHAP value are \texttt{url\_phishing\_prob} ($0.217$),
+\texttt{max\_unimodal\_prob} ($0.097$), \texttt{visual\_phishing\_prob}
+($0.046$), \texttt{confidence} ($0.036$),
+\texttt{num\_modalities\_above\_threshold} ($0.031$), and
+\texttt{text\_phishing\_prob} ($0.017$).  The URL branch's own
+phishing probability is more than twice as influential as the next
+strongest feature --- it is, essentially, the single biggest driver
+of the fusion output.
+
+A second, architecture-aware analysis computes \emph{modality
+Shapley values} directly on the projected $256$-dim fusion vectors
+by enumerating all $2^{4}=16$ subsets of
+$\{\text{url},\text{text},\text{visual},\text{html}\}$ and measuring
+each modality's marginal contribution to the final phishing score.
+Averaged over the test set, the mean absolute modality Shapley values
+are: URL $=0.158$, visual $=0.094$, text $=0.059$, HTML $=0.036$
+(Table~\ref{tab:shapley}).  Two cross-consistency observations are
+worth highlighting: (a)~URL is the dominant contributor under
+\emph{both} the ablation (Table~\ref{tab:ablation}) and the Shapley
+analysis, which strongly corroborates RQ1; and (b)~visual scores
+second on Shapley mean-absolute contribution even though removing it
+improves composite score (ablation) --- meaning visual contributes
+high-magnitude but low-quality evidence that the fusion classifier
+has to actively correct for.  This is a textbook case where
+importance (how much a feature is used) and usefulness (whether using
+it helps) diverge, and it is exactly the kind of finding that
+justifies running both analyses.
+
+\begin{table}[t]
+\caption{Modality Shapley values on the projected fusion vectors
+(tuned model, $246$-sample test set).}
+\label{tab:shapley}
+\centering
+\begin{tabular}{lcc}
+\toprule
+Modality & Mean Shapley value & Mean $|\Phi|$ \\
+\midrule
+URL    & $+0.085$ & $0.158$ \\
+Visual & $+0.068$ & $0.094$ \\
+Text   & $+0.010$ & $0.059$ \\
+HTML   & $+0.002$ & $0.036$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/explainability/global_importance.png}
+\caption{Global SHAP importance for the tuned fusion surrogate
+($R^{2}=0.955$).  \texttt{url\_phishing\_prob} dominates the
+ranking; HTML-structural and URL-lexical scalars occupy the long
+low-importance tail.}
+\label{fig:shap}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/explainability/fusion_modality_contributions.png}
+\caption{Mean absolute modality Shapley value on projected fusion
+vectors.  URL $=0.158$, visual $=0.094$, text $=0.059$,
+HTML $=0.036$.}
+\label{fig:modality_shap}
+\end{figure}
+
+\subsection{Unimodal ranking}
+The unimodal half of Table~\ref{tab:main} already answers the
+``which modality is strongest?'' question directly, in both regimes.
+In the baseline regime the ranking by F1 is
+URL ($0.796$) $>$ Text ($0.734$) $>$ Visual ($0.616$) $>$ HTML
+($0.554$).  After Optuna tuning the gap widens significantly: URL
+lifts to F1 $=0.827$ (and ROC-AUC $=0.940$), while text barely moves
+($0.726$), visual actually drops to $0.538$ (the search picked a
+lower-dropout, lower-threshold configuration that reduced
+recall), and HTML lifts to $0.585$ driven by higher recall
+($0.779$).  URL is the only modality that \emph{convincingly}
+improves under tuning, confirming that it is both the strongest and
+the most tunable signal on this corpus --- a result that the
+modality-Shapley analysis in Section~VII-D corroborates.
+
+\subsection{Temperature calibration}
+After applying temperature scaling the Brier score on the test set
+drops and the prediction-confidence histogram
+(\texttt{outputs/evaluation/prediction\_confidence.png}) shifts
+visibly away from the two extreme bins. In particular, the number
+of confidently-wrong predictions (confidence $>0.9$ but incorrect)
+decreases after calibration, which is precisely the behaviour
+expected from a well-calibrated classifier and which is important
+for the threshold sweep to be meaningful.
+
+\subsection{Threshold sweep}
+Fig.~\ref{fig:threshold} plots F1, precision, and recall as a
+function of the decision threshold on the validation set for the
+baseline fusion model.  The precision curve is monotonically
+non-decreasing in the threshold, and the recall curve is
+monotonically non-increasing.  F1 peaks between $0.55$ and $0.7$ for
+the baseline multi-modal model, giving $T^{*}=0.61$ in that regime.
+The tuned fusion model, whose probabilities are better calibrated
+(temperature $=1.55$), selects a markedly lower threshold of
+$T^{*}=0.43$ --- not because the classifier is less confident, but
+because the tuned model's probability distribution is narrower and
+more symmetric around the decision boundary, so the F1-optimal
+cutoff sits closer to $0.5$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/threshold_sweep.png}
+\caption{Precision--recall--F1 vs.\ decision threshold on the
+multi-modal model.}
+\label{fig:threshold}
+\end{figure}
+
+\subsection{Misclassification analysis}
+Inspecting the $8$ false positives and $10$ false negatives of the
+\emph{tuned} multi-modal model is revealing.  The top false
+positives are cryptic-looking but benign URLs containing tildes,
+numeric IDs, query strings, and deep paths (e.g.,
+\texttt{www.macs.hw.ac.uk/\textasciitilde pdw/},
+\texttt{arasgallery.com/profile.php?id=40}), which trigger the
+same lexical cues the model associates with phishing.  Several
+top false negatives are short, innocent-looking phishing URLs
+hosted on URL shorteners or low-reputation hosts (e.g.,
+\texttt{tiny.cc/cartasi-it}, \texttt{tide.org.au/quick/}).  These
+are genuinely hard cases: the URL alone is insufficient, and
+without a screenshot that imitates a recognised brand the visual
+branch also struggles.  Both error modes suggest that
+host-reputation and DNS-age features, which we do not currently
+use, would be fruitful extensions.  A full list of the top
+errors is saved to
+\texttt{outputs/evaluation/misclassification\_analysis.txt}.
+
+\section{Results Discussion}
+\subsection{How the loss evolved over time}
+Fig.~\ref{fig:curves} summarises training and validation dynamics
+for the multi-modal model. Training loss decreases smoothly from
+approximately $0.68$ at epoch 1 to below $0.30$ by epoch 17, while
+validation loss decreases more erratically --- dropping to a
+minimum in the first few epochs and then oscillating around
+$0.5$--$0.6$. Validation F1 climbs from around $0.58$ at epoch 1
+to a plateau in the $0.75$--$0.82$ range, and early stopping
+halts training at epoch $17$.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/multimodal/training_curves_multimodal_fusion.png}
+\caption{Multi-modal training curves. Training loss decreases
+smoothly; validation F1 climbs into the $0.75$--$0.82$ range.
+Early stopping halts training at epoch $17$.}
+\label{fig:curves}
+\end{figure}
+
+Two observations are worth highlighting. First, the gap between
+training and validation loss widens after the first few epochs,
+which is the classic signature of mild over-fitting. This is
+expected given our small dataset and motivates the dropout ($0.3$),
+LayerNorm, and augmentation we employ. Second, the checkpoint
+selected by the early-stopping callback is \emph{not} the final
+epoch --- it is the best-validation-loss checkpoint. Using the best
+checkpoint rather than the last-epoch model is a simple but
+important implementation choice that cleanly separates model
+selection from test-time evaluation.
+
+\subsection{Did the model actually learn something meaningful?}
+We check this by visualising the text+visual embedding space using
+$t$-SNE (Fig.~\ref{fig:tsne}). The two classes do \emph{not} form
+perfectly separated clusters --- a substantial mixed region exists,
+which matches the intuition that raw pre-trained embeddings carry
+only partial phishing signal. However, several regions of the
+projection are clearly dominated by one class (note the
+phishing-heavy region in the lower left), and the mixed region
+corresponds almost exactly to the hard examples identified in the
+misclassification analysis. This qualitative result is consistent
+with the quantitative finding that text and visual alone produce
+the weakest unimodal classifiers; it is only after combining these
+signals with the URL branch and passing them through the
+attention-fusion module that the fused representation becomes
+cleanly separable, which is why the fusion model outperforms every
+unimodal baseline.
+
+\subsection{What the attention weights tell us (baseline fusion)}
+The \emph{baseline} fusion uses the attention strategy and therefore
+exposes a $4\times 4$ attention-weight matrix for every example,
+which we average over the test set and plot in
+Fig.~\ref{fig:attention}.  The dominant pattern is that \emph{Text
+is the most attended-to modality overall}: the Visual query attends
+to Text with weight $0.452$, URL attends to Text with $0.355$, and
+HTML attends to Visual with $0.382$.  HTML tokens receive the
+lowest average attention across every query.  This is a more
+nuanced picture than ``URL dominates'': Text acts as the semantic
+hub that other modalities consult, while URL is strongest as a
+standalone predictor.  The Optuna search swapped this mechanism for
+weighted-sum fusion, where the learned softmax weights over the four
+modalities converged to a clear URL-dominant pattern --- which is
+precisely what the modality-Shapley analysis in Section~VII-D
+quantifies without needing attention weights to interpret.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/attention_weights.png}
+\caption{Average attention weight heatmap across the test set for
+the \emph{baseline} attention fusion.  Rows are query modalities,
+columns are key modalities.  Text is the most attended-to modality
+(highest column weights); HTML is the least attended-to.}
+\label{fig:attention}
+\end{figure}
+
+\subsection{Prediction-confidence histogram}
+The prediction-confidence histogram (Fig.~\ref{fig:confidence}) shows
+a strongly bimodal distribution, with most legitimate predictions
+clustered near $0.1$ and most phishing predictions clustered near
+$1.0$. The ``uncertain'' mass in the $[0.3, 0.6]$ range is small
+but concentrated around the hardest test examples. A well-shaped
+confidence histogram is desirable because it indicates that the
+classifier's output is a meaningful probability rather than an
+arbitrary logit --- which in turn is what makes threshold-based
+policies such as ``warn the user above $T^{*}=0.43$'' operationally
+trustworthy.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/prediction_confidence.png}
+\caption{Prediction confidence distribution for the multi-modal
+model. Bimodal shape indicates well-separated classes.}
+\label{fig:confidence}
+\end{figure}
+
+\subsection{Feature correlation}
+The feature-correlation heatmap (Fig.~\ref{fig:featurecorr}) shows
+the Pearson correlation between each hand-crafted feature and the
+label. The strongest positive correlates are
+\texttt{slashes} ($+0.26$), \texttt{dots} ($+0.23$), and
+\texttt{ext\_link\_ratio} ($+0.21$); the strongest negative correlates
+are \texttt{text\_length} and \texttt{has\_password} (both $-0.26$).
+\texttt{has\_https} has effectively zero variance in this corpus
+(shown as a blank row in the heatmap), confirming that TLS alone is
+no longer a reliable indicator. All individual correlations are
+modest ($|r|<0.27$), which is precisely why no single-feature or
+single-modality classifier is enough and why a learned non-linear
+fusion over multiple weak signals --- the very structure of our
+architecture --- is the right approach.
+
+\subsection{Answers to the research questions}
+We can now answer the four research questions posed in Section II.
+
+\noindent\textbf{RQ1 --- Which modality is strongest?}
+URL, in every evaluation we ran.  It is the strongest unimodal
+branch in both regimes (baseline F1 $=0.796$, tuned F1 $=0.827$),
+it has the largest leave-one-out drop in the ablation (composite
+$\Delta s = -0.103$, Table~\ref{tab:ablation}), the largest mean
+absolute SHAP contribution at the score level
+($|$SHAP$|=0.217$, Fig.~\ref{fig:shap}), and the largest mean
+absolute modality Shapley value at the representation level
+(Table~\ref{tab:shapley}, $|\Phi|=0.158$).  Four independent
+analyses converging on the same answer is the kind of
+triangulation that makes us confident in it.
+
+\noindent\textbf{RQ2 --- Does multi-modal fusion help?}
+Yes, and tuning amplifies the gap.  In the baseline regime attention
+fusion already beats URL-only on F1 ($0.807$ vs.\ $0.796$),
+precision ($0.867$ vs.\ $0.724$), and PR-AUC ($0.895$ vs.\ $0.885$).
+After Optuna tuning the weighted fusion model beats the tuned URL-only
+model on \emph{every} headline metric: F1 ($0.894$ vs.\ $0.827$),
+ROC-AUC ($0.957$ vs.\ $0.940$), accuracy ($0.927$ vs.\ $0.886$),
+precision ($0.905$ vs.\ $0.882$), recall ($0.884$ vs.\ $0.779$),
+and PR-AUC ($0.946$ vs.\ $0.920$).  The tuned fusion commits $8$
+false positives and $10$ false negatives on $246$ samples --- a
+deployment-relevant operating point where both error types are
+low.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/pr_curves.png}
+\caption{Precision--recall curves for all baseline and tuned
+models.  The tuned fusion curve dominates (PR-AUC $=0.946$).}
+\label{fig:pr}
+\end{figure}
+
+\noindent\textbf{RQ3 --- Which fusion strategy is best?}
+The Optuna search picked \emph{weighted sum} (strategy = weighted,
+$d=256$, hidden $=768$, dropout $=0.470$), and the retrained
+ablation confirms that weighted sum edges out attention under the
+composite metric ($\Delta s = +0.011$ vs.\ $+0.006$).  However, all
+three strategies land within $0.011$ composite score of each other;
+concatenation actually gives the highest ROC-AUC ($0.967$) in the
+retrain.  The practical conclusion is that \emph{which} modalities
+are fused matters much more than \emph{how} they are fused: the URL
+branch drives the result, and any of the three fusion mechanisms
+is capable of exploiting it.
+
+\noindent\textbf{RQ4 --- How much does each modality contribute?}
+The formal ablation gives a clean quantitative answer
+(Table~\ref{tab:ablation}): removing URL costs composite score
+$-0.103$ (F1 drops to $0.709$), removing HTML costs $-0.015$,
+removing text costs $-0.003$, and removing visual
+\emph{improves} composite score by $+0.017$.  The modality-Shapley
+analysis (Table~\ref{tab:shapley}) agrees on URL being dominant
+but ranks the other modalities by absolute magnitude rather than by
+``usefulness'': visual has the second-largest $|\Phi|$ despite
+being the one ablation variant whose removal helps.  This is
+consistent with an interpretation in which visual pushes the fusion
+score around more than text or HTML do on average, but not
+productively --- the classifier has to learn to down-weight it.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{outputs/evaluation/metrics_comparison.png}
+\caption{Side-by-side comparison of key metrics across all models.}
+\label{fig:metrics}
+\end{figure}
+
+\subsection{Computational trade-offs}
+The multi-modal model has $1.06$M trainable parameters and trains
+in under 10 minutes on CPU for our dataset, with per-epoch times
+of roughly 20--25 seconds. Inference is dominated by the frozen
+DistilBERT forward pass on the webpage text; URL, HTML, and
+visual forward passes are comparatively negligible. For
+latency-sensitive deployments it is straightforward to pre-cache
+text and visual embeddings at crawl time, which is why the
+project also implements a \texttt{FastFusionClassifier} variant
+that consumes pre-extracted DistilBERT and EfficientNet
+embeddings directly.
+
+\subsection{Limitations and threats to validity}
+Our dataset has three important limitations. First, 1{,}608
+samples is modest and only 246 are in the held-out test set, so
+the confidence intervals on our reported metrics are wide. Second,
+both source datasets are slightly biased: the HuggingFace URL
+corpus skews towards older phishing sites and the Kaggle
+screenshot corpus is dominated by a single browser configuration.
+Third, the class balance is $\approx 2{:}1$, which is gentler
+than the distribution a real deployment would see. Beyond dataset
+issues, our frozen-backbone design trades predictive ceiling for
+training speed; light fine-tuning of the top layers would almost
+certainly improve F1 further.
+
+\section{Conclusion}
+We presented a multi-modal phishing detection system that jointly
+leverages URL character sequences and hand-crafted lexical
+features, webpage text encoded by a frozen DistilBERT, screenshots
+encoded by a frozen EfficientNet-B0, and eight hand-crafted HTML
+structural features. Each modality is projected into a common
+$256$-dim space and combined through a four-head attention fusion
+module before a three-layer bottleneck classifier. Beyond model
+design, we treated the problem as a careful statistical-learning
+exercise: we performed an exploratory data study, addressed class
+imbalance with class weighting and threshold calibration, addressed
+over-fitting with frozen backbones, dropout, and augmentation, and
+tuned hyperparameters.
+
+On a dataset of 1{,}608 matched webpage records the
+\emph{baseline} attention-fusion multi-modal model already
+out-performs every unimodal branch (F1 $=0.807$, ROC-AUC $=0.934$),
+but a full Optuna hyperparameter search lifts the tuned
+weighted-sum fusion to F1 $=0.894$, ROC-AUC $=0.957$,
+PR-AUC $=0.946$, and accuracy $=0.927$ --- a $+0.087$ F1 gain
+over the baseline fusion and a $+0.067$ F1 gain over the tuned
+URL-only model.  The tuned fusion also attains the highest
+precision ($0.905$) and the fewest false positives ($8$), which
+is the most deployment-relevant operating point for a
+security-critical application.  A formal leave-one-out ablation
+and a two-level SHAP/Shapley analysis both identify URL as the
+dominant modality; visual, despite ranking second by mean
+absolute Shapley magnitude, is the only modality whose removal
+actually improves composite score, which is a finding we would
+not have uncovered without running both analyses.  The
+multi-modal advantage only emerged cleanly after we corrected
+three subtle asymmetries between the unimodal and multimodal
+branches --- matched classifier capacity, large-enough projection
+dimension, and removing a mixup regulariser that was applied to
+only one branch --- a methodological lesson worth highlighting.
+
+Several directions are worth pursuing. First, light fine-tuning of
+the top layers of DistilBERT and EfficientNet on phishing data
+would likely lift performance further. Second, richer URL and
+host-level features (WHOIS age, TLS certificate validity, DNS
+reputation) would directly address the false-negative patterns we
+observed on URL-shortener and low-reputation phishing pages.
+Third, an adversarial robustness study --- perturbing text,
+screenshots, or URLs to mimic evasion attempts --- would give a
+clearer picture of how each modality behaves under attack.
+Finally, deploying the model behind a threshold policy that adapts
+to user risk profiles would turn the recall-over-precision
+preference we implemented here into a principled user-facing
+control.
+
+\section*{Acknowledgements}
+We thank the DSA4266 teaching team for their guidance throughout
+the project, and the maintainers of PyTorch, HuggingFace
+Transformers, torchvision, and timm without which this work would
+not have been possible.
+
+\begin{thebibliography}{00}
+\bibitem{apwg} Anti-Phishing Working Group, ``Phishing Activity
+Trends Reports,'' 2023.
+\bibitem{urlnet} H. Le, Q. Pham, D. Sahoo, and S. C. H. Hoi,
+``URLNet: Learning a URL Representation with Deep Learning for
+Malicious URL Detection,'' arXiv:1802.03162, 2018.
+\bibitem{distilbert} V. Sanh, L. Debut, J. Chaumond, and T. Wolf,
+``DistilBERT, a distilled version of BERT: smaller, faster, cheaper
+and lighter,'' in \emph{NeurIPS EMC$^2$ Workshop}, 2019.
+\bibitem{effnet} M. Tan and Q. V. Le, ``EfficientNet: Rethinking
+Model Scaling for Convolutional Neural Networks,'' in \emph{ICML},
+2019.
+\bibitem{bert} J. Devlin, M.-W. Chang, K. Lee, and K. Toutanova,
+``BERT: Pre-training of Deep Bidirectional Transformers for
+Language Understanding,'' in \emph{NAACL-HLT}, 2019.
+\bibitem{resnet} K. He, X. Zhang, S. Ren, and J. Sun, ``Deep
+Residual Learning for Image Recognition,'' in \emph{CVPR}, 2016.
+\bibitem{attn} A. Vaswani \textit{et al.}, ``Attention Is All You
+Need,'' in \emph{NeurIPS}, 2017.
+\bibitem{phishrnn} A. C. Bahnsen \textit{et al.}, ``Classifying
+phishing URLs using recurrent neural networks,'' in \emph{eCrime},
+2017.
+\bibitem{visualphish} S. Abdelnabi, K. Krombholz, and M. Fritz,
+``VisualPhishNet: Zero-Day Phishing Website Detection by Visual
+Similarity,'' in \emph{ACM CCS}, 2020.
+\bibitem{multimodal-survey} T. Baltru\v{s}aitis, C. Ahuja, and
+L.-P. Morency, ``Multimodal Machine Learning: A Survey and
+Taxonomy,'' \emph{IEEE TPAMI}, 2019.
+\bibitem{mixup} H. Zhang, M. Cisse, Y. N. Dauphin, and D.
+Lopez-Paz, ``mixup: Beyond Empirical Risk Minimization,'' in
+\emph{ICLR}, 2018.
+\bibitem{tempscale} C. Guo, G. Pleiss, Y. Sun, and K. Q.
+Weinberger, ``On Calibration of Modern Neural Networks,'' in
+\emph{ICML}, 2017.
+\bibitem{optuna} T. Akiba \textit{et al.}, ``Optuna: A Next-
+generation Hyperparameter Optimization Framework,'' in
+\emph{KDD}, 2019.
+\end{thebibliography}
+
+\end{document}

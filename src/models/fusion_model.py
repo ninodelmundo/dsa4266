@@ -256,17 +256,21 @@ class FastFusionClassifier(nn.Module):
             )
             self.attention_norm = nn.LayerNorm(self.projected_dim)
 
-        # Classifier head
+        # Classifier head (3-layer bottleneck, matching unimodal baselines)
         if self.strategy == "concatenation":
             classifier_in = self.projected_dim * len(self.active_modalities)
         else:
             classifier_in = self.projected_dim
 
+        bottleneck_dim = max(classifier_in // 2, 64)
         self.classifier = nn.Sequential(
             nn.Linear(classifier_in, self.hidden_dim),
             nn.ReLU(),
             nn.Dropout(self.dropout_p),
-            nn.Linear(self.hidden_dim, 2),
+            nn.Linear(self.hidden_dim, bottleneck_dim),
+            nn.ReLU(),
+            nn.Dropout(self.dropout_p),
+            nn.Linear(bottleneck_dim, 2),
         )
 
     def forward(

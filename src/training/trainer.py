@@ -244,12 +244,8 @@ class Trainer:
 
             self.optimizer.zero_grad()
             with self._autocast_context():
-                # Use manifold mixup for fast_multimodal during training.
-                if self.model_type == "fast_multimodal":
-                    logits, loss = self._mixup_forward(batch, labels)
-                else:
-                    logits = self._forward_batch(batch)
-                    loss = self.criterion(logits, labels)
+                logits = self._forward_batch(batch)
+                loss = self.criterion(logits, labels)
 
             if self.use_amp:
                 self.scaler.scale(loss).backward()
