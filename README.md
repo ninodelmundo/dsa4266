@@ -58,6 +58,48 @@ If you do not have a CUDA GPU, change `project.device` in `configs/config.yaml` 
 
 ## User Guide
 
+`main.py` is the source-of-truth orchestrator for the current workflow. It runs the
+same stage-specific scripts that can also be called directly from `scripts/`.
+
+### Which Command Should I Run?
+
+For a first-time baseline run:
+
+```bash
+python3 main.py
+```
+
+This runs:
+
+```text
+download -> preprocess -> auxiliary plots -> baseline unimodal training -> baseline fusion training -> evaluation
+```
+
+If the data is already downloaded and you want the full research workflow with
+optimization, ablation, and explainability:
+
+```bash
+python3 main.py --skip-download --optimize --ablation --explain
+```
+
+If you also want to redownload the datasets first:
+
+```bash
+python3 main.py --optimize --ablation --explain
+```
+
+To rerun a single stage:
+
+```bash
+python3 main.py --step <step>
+```
+
+Available steps are:
+
+```text
+download, preprocess, aux, baseline, optimize, ablation, evaluate, explain, all
+```
+
 ### 1. Download Data
 
 Run this before preprocessing or training:
@@ -84,42 +126,81 @@ This creates:
 
 ```text
 data/processed/merged_dataset.csv
-*Note: Only after completing this step should you run EDA.ipynb.
 ```
 
-### 3. Train The Multimodal Model
+After this step completes, the EDA notebook has the merged data it needs.
 
-Train the fast multimodal fusion model:
+### 3. Generate Auxiliary Data-Study Plots
+
+Generate class-distribution, dataset-statistics, embedding, feature-correlation,
+and learning-rate-schedule plots:
 
 ```bash
-python3 main.py --step train
+python3 main.py --step aux
 ```
 
-During the first training run, the pipeline extracts and caches frozen text and visual embeddings. Later runs reuse the cached features when possible.
+These plots are saved under:
+
+```text
+outputs/evaluation/
+```
+
+### 4. Train Baseline Unimodal And Fusion Models
+
+Train URL-only, text-only, visual-only, HTML-structure-only, and baseline fusion
+models:
+
+```bash
+python3 main.py --step baseline
+```
+
+During the first baseline run, the pipeline extracts and caches frozen text and
+visual embeddings. Later runs reuse cached features when possible.
 
 Expected generated files include:
 
 ```text
 data/processed/features.pt
-outputs/multimodal/best_model.pt
-outputs/multimodal/training_curves_multimodal_fusion.png
+outputs/baseline/unimodal/
+outputs/baseline/fusion/
 outputs/run.log
 ```
 
-### 4. Train With Unimodal Baselines
+### 5. Optimize Unimodal And Fusion Models
 
-To train URL-only, text-only, visual-only, and multimodal models in one run:
+Run Optuna tuning for unimodal models and then the fusion model:
 
 ```bash
-python3 main.py --step train --unimodal
+python3 main.py --step optimize
 ```
 
-### 5. Run The Full Pipeline
+This saves results under:
 
-To download, preprocess, train, and evaluate in one command:
+```text
+outputs/optimization/unimodal/
+outputs/optimization/fusion/
+```
+
+### 6. Run Ablation Analysis
+
+Run the tuned fusion ablation workflow:
 
 ```bash
-python3 main.py --unimodal
+python3 main.py --step ablation
+```
+
+This saves results under:
+
+```text
+outputs/optimization/ablation/
+```
+
+### 7. Evaluate Available Results
+
+Run unified evaluation across available baseline and optimization outputs:
+
+```bash
+python3 main.py --step evaluate
 ```
 
 Evaluation plots and summaries are saved under:
@@ -128,9 +209,25 @@ Evaluation plots and summaries are saved under:
 outputs/evaluation/
 ```
 
-## Optimization And Ablation Workflow
+### 8. Run Explainability
 
-The project includes an Optuna-based workflow for tuning unimodal models, tuning the fusion model, and running ablation analysis.
+Run SHAP-based surrogate explanations, fusion modality Shapley diagnostics, and
+local URL/text/image explanations:
+
+```bash
+python3 main.py --step explain
+```
+
+Results are saved to:
+
+```text
+outputs/explainability/
+```
+
+## Direct Optimization And Ablation Scripts
+
+The commands above are the recommended beginner path. The underlying scripts can
+also be run directly when you want finer control over one stage.
 
 ### 1. Optimize Unimodal Models
 
@@ -191,9 +288,10 @@ Important artifacts:
 
 The ablation workflow evaluates the full tuned fusion model, variants with individual modalities removed, variants without handcrafted URL scalar features, and alternative fusion strategies.
 
-## Explainability Workflow
+## Direct Explainability Script
 
-Run SHAP-based surrogate explanations, fusion modality Shapley diagnostics, and local URL/text/image explanations with:
+The recommended entrypoint is `python3 main.py --step explain`. You can also call
+the explainability script directly:
 
 ```bash
 python3 scripts/run_explainability.py --config configs/config.yaml
@@ -253,4 +351,4 @@ Feature extraction can be slow on the first run because pretrained DistilBERT an
 - No CUDA device: set `project.device` to `cpu` in `configs/config.yaml`.
 - Slow first training run: this is expected because text and image features are extracted and cached.
 - Shapash missing: install it in the active environment with `python3 -m pip install shapash dash`, then verify with `python3 -c "import shapash; print(shapash.__version__)"`.
-- Standalone script confusion: prefer `main.py`, `scripts/optimize_unimodal.py`, `scripts/optimize_fusion.py`, and `scripts/run_ablation.py` for the current workflow.
+- Standalone script confusion: prefer `main.py` for the current workflow, and use direct scripts only when you intentionally want to run one stage by hand.

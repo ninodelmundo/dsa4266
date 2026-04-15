@@ -16,24 +16,29 @@ baseline and Optuna-tuned results can be compared apples-to-apples:
 
 Usage
 -----
-    # Full default pipeline: download -> preprocess -> aux plots ->
-    # baseline unimodal -> baseline fusion -> evaluate.
-    python main.py
+    # Full default pipeline - download -> preprocess -> aux plots ->
+    # baseline unimodal -> baseline fusion -> evaluate:
+    python3 main.py
 
-    # Include Optuna tuning (slow; many trials) and ablation.
-    python main.py --optimize --ablation
+    # Include Optuna tuning (slow; many trials) and ablation study:
+    python3 main.py --optimize --ablation
 
-    # Include explainability (requires a trained fusion checkpoint).
-    python main.py --explain
+    # Include explainability (requires a trained fusion checkpoint):
+    python3 main.py --explain
 
-    # Just one step.
-    python main.py --step download
-    python main.py --step aux          # regenerate EDA / data-study plots
-    python main.py --step baseline     # baseline unimodal + fusion
-    python main.py --step optimize     # optimize_unimodal + optimize_fusion
-    python main.py --step ablation     # run_ablation
-    python main.py --step evaluate     # scripts/evaluate.py over all sources
-    python main.py --step explain      # scripts/run_explainability.py
+    # One Step Implementation:
+    python3 main.py --step download
+    python3 main.py --step aux          # regenerate EDA / data-study plots
+    python3 main.py --step baseline     # baseline unimodal + fusion
+    python3 main.py --step optimize     # optimize_unimodal + optimize_fusion
+    python3 main.py --step ablation     # run_ablation
+    python3 main.py --step evaluate     # scripts/evaluate.py over all sources
+    python3 main.py --step explain      # scripts/run_explainability.py
+
+    # To run the Full Extended Workflow:
+    python main.py --optimize --ablation --explain
+    # OR without downloading again:
+    python3 main.py --skip-download --optimize --ablation --explain
 """
 import argparse
 import os

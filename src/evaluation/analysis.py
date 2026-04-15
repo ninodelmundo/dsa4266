@@ -1,4 +1,5 @@
 import os
+import json
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -12,6 +13,7 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
     confusion_matrix,
     classification_report,
+    silhouette_score,
 )
 from typing import Dict, List, Optional
 
@@ -247,34 +249,223 @@ def plot_dataset_stats(df: pd.DataFrame, output_dir: str):
     return path
 
 
-def plot_embedding_tsne(features: dict, output_dir: str, perplexity: int = 30):
-    """t-SNE visualization of fused embeddings to show learned clusters."""
-    import torch
+def _safe_tsne_perplexity(n_samples: int, requested: int) -> int:
+    """Return a valid deterministic t-SNE perplexity for the sample size."""
+    if n_samples < 4:
+        return max(1, n_samples - 1)
+    return max(2, min(requested, n_samples - 1, n_samples // 3))
 
+
+def _compute_tsne_coords(embeddings: np.ndarray, perplexity: int = 30) -> np.ndarray:
+    embeddings = np.asarray(embeddings)
+    if len(embeddings) < 2:
+        raise ValueError("t-SNE requires at least two samples")
+    tsne = TSNE(
+        n_components=2,
+        perplexity=_safe_tsne_perplexity(len(embeddings), perplexity),
+        random_state=42,
+        max_iter=1000,
+    )
+    return tsne.fit_transform(embeddings)
+
+
+def _plot_tsne_scatter(ax, coords: np.ndarray, labels: np.ndarray, title: str):
+    for label, name, color in [(0, "Legitimate", "#4CAF50"), (1, "Phishing", "#F44336")]:
+        mask = labels == label
+        ax.scatter(
+            coords[mask, 0],
+            coords[mask, 1],
+            c=color,
+            label=name,
+            alpha=0.6,
+            s=20,
+            edgecolors="none",
+        )
+    ax.set_title(title)
+    ax.set_xlabel("t-SNE 1")
+    ax.set_ylabel("t-SNE 2")
+    ax.legend()
+
+
+def _silhouette_or_nan(embeddings: np.ndarray, labels: np.ndarray) -> float:
+    try:
+        if len(np.unique(labels)) < 2 or len(labels) < 3:
+            return float("nan")
+        return float(silhouette_score(embeddings, labels))
+    except Exception:
+        return float("nan")
+
+
+def plot_embedding_tsne(features: dict, output_dir: str, perplexity: int = 30):
+    """t-SNE visualization of raw cached text + visual embeddings."""
     labels = features["labels"].numpy()
     text_emb = features["text_embeddings"].numpy()
     visual_emb = features["visual_embeddings"].numpy()
 
-    # Concatenate text + visual as a proxy for the fused representation
+    # Pre-model representation: cached DistilBERT + EfficientNet embeddings.
     combined = np.concatenate([text_emb, visual_emb], axis=1)
-
-    tsne = TSNE(n_components=2, perplexity=perplexity, random_state=42, max_iter=1000)
-    coords = tsne.fit_transform(combined)
+    coords = _compute_tsne_coords(combined, perplexity=perplexity)
 
     fig, ax = plt.subplots(figsize=(8, 7))
-    for label, name, color in [(0, "Legitimate", "#4CAF50"), (1, "Phishing", "#F44336")]:
-        mask = labels == label
-        ax.scatter(coords[mask, 0], coords[mask, 1], c=color, label=name,
-                   alpha=0.6, s=20, edgecolors="none")
-    ax.set_title("t-SNE of Combined Text + Visual Embeddings")
-    ax.set_xlabel("t-SNE 1")
-    ax.set_ylabel("t-SNE 2")
-    ax.legend()
+    _plot_tsne_scatter(ax, coords, labels, "t-SNE of Raw Cached Text + Visual Embeddings")
     plt.tight_layout()
-    path = os.path.join(output_dir, "embedding_tsne.png")
+    path = os.path.join(output_dir, "embedding_tsne_raw_text_visual.png")
     plt.savefig(path, dpi=150)
     plt.close()
+
+    # Backward-compatible copy for older notebooks/reports that referenced this name.
+    legacy_path = os.path.join(output_dir, "embedding_tsne.png")
+    fig, ax = plt.subplots(figsize=(8, 7))
+    _plot_tsne_scatter(ax, coords, labels, "t-SNE of Raw Cached Text + Visual Embeddings")
+    plt.tight_layout()
+    plt.savefig(legacy_path, dpi=150)
+    plt.close()
     return path
+
+
+def collect_raw_text_visual_embeddings(loader) -> tuple:
+    """Collect held-out raw cached text+visual embeddings and labels from a dataloader."""
+    raw_embeddings = []
+    labels = []
+    for batch in loader:
+        raw_embeddings.append(
+            np.concatenate(
+                [
+                    batch["text_emb"].detach().cpu().numpy(),
+                    batch["visual_emb"].detach().cpu().numpy(),
+                ],
+                axis=1,
+            )
+        )
+        labels.append(batch["label"].detach().cpu().numpy())
+    return np.concatenate(raw_embeddings, axis=0), np.concatenate(labels, axis=0)
+
+
+def collect_fusion_embeddings(model, loader, device) -> tuple:
+    """
+    Collect learned fused representations immediately before the fusion classifier.
+
+    This mirrors FastFusionClassifier.forward up to the `fused` tensor so the
+    t-SNE reflects the trained fusion representation, not raw cached features.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    model.eval()
+    fused_embeddings = []
+    labels = []
+    disabled_modalities = getattr(model, "disabled_modalities", set())
+    use_url_scalar_features = getattr(model, "use_url_scalar_features", True)
+
+    with torch.no_grad():
+        for batch in loader:
+            url_tokens = batch["url"].to(device)
+            url_features = batch["url_features"].to(device)
+            html_features = batch["html_features"].to(device)
+            text_emb = batch["text_emb"].to(device)
+            visual_emb = batch["visual_emb"].to(device)
+
+            projected = []
+            if "url" not in disabled_modalities:
+                url_encoder_out = model.url_encoder(url_tokens)
+                if use_url_scalar_features:
+                    url_encoder_out = torch.cat([url_encoder_out, url_features], dim=-1)
+                projected.append(model.url_proj(url_encoder_out))
+            if "text" not in disabled_modalities:
+                projected.append(model.text_proj(text_emb))
+            if "visual" not in disabled_modalities:
+                projected.append(model.visual_proj(visual_emb))
+            if "html" not in disabled_modalities:
+                projected.append(model.html_proj(html_features))
+
+            if model.strategy == "concatenation":
+                fused = torch.cat(projected, dim=-1)
+            elif model.strategy == "weighted":
+                weights = F.softmax(model.modality_weights, dim=0)
+                fused = sum(weight * emb for weight, emb in zip(weights, projected))
+            elif model.strategy == "attention":
+                stack = torch.stack(projected, dim=1)
+                attended, _ = model.attention(stack, stack, stack)
+                attended = model.attention_norm(attended + stack)
+                fused = attended.mean(dim=1)
+            else:
+                raise ValueError(f"Unknown fusion strategy: {model.strategy}")
+
+            fused_embeddings.append(fused.detach().cpu().numpy())
+            labels.append(batch["label"].detach().cpu().numpy())
+
+    return np.concatenate(fused_embeddings, axis=0), np.concatenate(labels, axis=0)
+
+
+def plot_fusion_tsne_comparison(
+    model,
+    loader,
+    output_dir: str,
+    source_name: str = "optimization",
+    perplexity: int = 30,
+):
+    """Plot raw cached feature t-SNE beside learned final fusion t-SNE."""
+    raw_embeddings, raw_labels = collect_raw_text_visual_embeddings(loader)
+    learned_embeddings, learned_labels = collect_fusion_embeddings(model, loader, next(model.parameters()).device)
+
+    if not np.array_equal(raw_labels, learned_labels):
+        raise ValueError("Raw and learned t-SNE labels are not aligned")
+
+    raw_coords = _compute_tsne_coords(raw_embeddings, perplexity=perplexity)
+    learned_coords = _compute_tsne_coords(learned_embeddings, perplexity=perplexity)
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    _plot_tsne_scatter(ax, raw_coords, raw_labels, "t-SNE of Raw Cached Text + Visual Embeddings")
+    plt.tight_layout()
+    raw_path = os.path.join(output_dir, "embedding_tsne_raw_text_visual.png")
+    plt.savefig(raw_path, dpi=150)
+    legacy_path = os.path.join(output_dir, "embedding_tsne.png")
+    plt.savefig(legacy_path, dpi=150)
+    plt.close()
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+    _plot_tsne_scatter(
+        ax,
+        learned_coords,
+        learned_labels,
+        f"t-SNE of Learned Final Fusion Representations ({source_name})",
+    )
+    plt.tight_layout()
+    learned_path = os.path.join(output_dir, "embedding_tsne_final_fusion.png")
+    plt.savefig(learned_path, dpi=150)
+    plt.close()
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    _plot_tsne_scatter(axes[0], raw_coords, raw_labels, "Raw Cached Text + Visual")
+    _plot_tsne_scatter(axes[1], learned_coords, learned_labels, f"Learned Fusion ({source_name})")
+    fig.suptitle("t-SNE Comparison: Raw Feature Space vs Learned Fusion Space")
+    plt.tight_layout()
+    comparison_path = os.path.join(output_dir, "embedding_tsne_raw_vs_final_fusion.png")
+    plt.savefig(comparison_path, dpi=150)
+    plt.close()
+
+    summary = {
+        "source": source_name,
+        "split": "test",
+        "n_samples": int(len(raw_labels)),
+        "raw_embedding_dim": int(raw_embeddings.shape[1]),
+        "learned_fusion_dim": int(learned_embeddings.shape[1]),
+        "raw_silhouette": _silhouette_or_nan(raw_embeddings, raw_labels),
+        "learned_fusion_silhouette": _silhouette_or_nan(learned_embeddings, learned_labels),
+        "files": {
+            "raw_text_visual_tsne": raw_path,
+            "legacy_raw_text_visual_tsne": legacy_path,
+            "final_fusion_tsne": learned_path,
+            "comparison_tsne": comparison_path,
+        },
+        "note": (
+            "The raw plot uses cached DistilBERT text + EfficientNet visual embeddings. "
+            "The learned plot uses the trained fusion vector immediately before the classifier head."
+        ),
+    }
+    with open(os.path.join(output_dir, "embedding_tsne_summary.json"), "w") as f:
+        json.dump(summary, f, indent=2)
+    return summary
 
 
 def plot_threshold_sweep(y_true: np.ndarray, y_prob: np.ndarray, output_dir: str):

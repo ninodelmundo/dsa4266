@@ -53,6 +53,7 @@ from src.evaluation.metrics import (
 from src.evaluation.analysis import (
     ablation_study_plot,
     plot_confusion_matrix,
+    plot_fusion_tsne_comparison,
     plot_metrics_comparison,
     plot_pr_curves,
     plot_roc_curves,
@@ -251,6 +252,7 @@ def main():
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    fusion_tsne_run = None
     for source in args.sources:
         logger.info("Evaluating runs from source=%s", source)
         for modality in MODALITIES:
@@ -281,6 +283,11 @@ def main():
             f"Multimodal ({source}) CM",
         )
         rows.append(evaluated)
+        if fusion_tsne_run is None or source == "optimization":
+            fusion_tsne_run = {
+                "source": source,
+                "model": fusion_run["model"],
+            }
 
     if not rows:
         logger.error("No runs found to evaluate. Run the training or optimization scripts first.")
@@ -305,6 +312,21 @@ def main():
     sources_present = {row["source"] for row in rows}
     if {"baseline", "optimization"}.issubset(sources_present):
         ablation_study_plot(all_results, str(eval_dir))
+
+    if fusion_tsne_run is not None:
+        logger.info(
+            "Generating learned-fusion t-SNE comparison from source=%s",
+            fusion_tsne_run["source"],
+        )
+        try:
+            plot_fusion_tsne_comparison(
+                fusion_tsne_run["model"],
+                test_loader,
+                str(eval_dir),
+                source_name=fusion_tsne_run["source"],
+            )
+        except Exception as exc:
+            logger.warning("Could not generate learned-fusion t-SNE comparison: %s", exc)
 
     # Machine-readable summary
     summary_rows = []
